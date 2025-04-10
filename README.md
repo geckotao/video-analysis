@@ -19,3 +19,6 @@ pip install opencv-python ultralytics ttkbootstrap lap psutil
 运行
 
 python main.py
+
+[屏幕截图](https://github.com/user-attachments/assets/e4b1c230-86cb-4da1-9bbd-acb7f0b706c8)
+
