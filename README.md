@@ -20,5 +20,5 @@ pip install opencv-python ultralytics ttkbootstrap lap psutil
 
 python main.py
 
-[屏幕截图](https://github.com/user-attachments/assets/e4b1c230-86cb-4da1-9bbd-acb7f0b706c8)
+![屏幕截图 2025-04-10 111024](https://github.com/user-attachments/assets/7163e347-6b05-44b3-a3f5-367471a32e29)
 
