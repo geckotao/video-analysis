@@ -322,7 +322,7 @@ class VideoProcessorGUI:
                 var.set(True)
             self.select_button.config(text="取消全选")
     
-     def select_roi(self):
+    def select_roi(self):
         try:
             if self.video_paths:
                 cap = cv2.VideoCapture(self.video_paths[0])
