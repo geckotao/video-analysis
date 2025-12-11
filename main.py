@@ -8,12 +8,12 @@ from ultralytics import YOLO  # YOLO目标检测模型库
 import time  # 时间相关操作（如延时、计时）
 import logging  # 日志记录，用于调试和错误追踪
 from threading import Lock, Thread  # 线程锁和线程类，实现多线程处理
+import threading  # threading线程
 from queue import Queue  # 队列，用于线程间数据传递
 import queue  # 队列相关异常处理
 from tkinter import filedialog, messagebox  # Tkinter文件选择和消息弹窗
 import configparser  # 配置文件解析器，读取set.ini配置
 import concurrent.futures  # 高级线程池，管理多线程任务
-from ttkbootstrap.constants import *  # TTK Bootstrap常量（如组件样式）
 import torch
 
 # 读取配置文件的函数
@@ -68,13 +68,13 @@ def calculate_iou(box1, box2):
     return inter_area / union_area
 
 # 检查目标是否已被捕获的函数
-def is_target_captured(captured_targets, target_identifier):
+def is_target_not_yet_captured(captured_targets, target_identifier):
     return target_identifier not in captured_targets
 
 # 保存检测截图的函数（全画面）
 def save_detection_screenshot(original_frame, save_path, video_filename, frame_number, object_type, saved_objects_count, confidence):
     file_name = os.path.join(save_path,
-                             f"{frame_number}_{object_type}_{confidence:.2f}_{saved_objects_count}_{os.path.splitext(video_filename)[0]}.jpg")
+                             f"{object_type}_{os.path.splitext(video_filename)[0]}_{saved_objects_count}.jpg")
     try:
         cv2.imwrite(file_name, original_frame)
         return True
@@ -109,6 +109,8 @@ class VideoProcessingCore:
         self.frame_queue = Queue(maxsize=FRAME_QUEUE_SIZE)
         self.lock = Lock()
         self.pause_stop_lock = Lock()
+        self.resume_event = threading.Event()
+        self.resume_event.set()  # 初始为运行状态
         self.last_screenshot_time = {}
         self.last_screenshot = {}
         self.roi_points = []  #ROI 点（跨视频保留）
@@ -159,7 +161,7 @@ class VideoProcessingCore:
                                 continue
 
                         target_identifier = f"{cls_id}_{round(x1 / 10)}_{round(y1 / 10)}_{round(x2 / 10)}_{round(y2 / 10)}"
-                        if not is_target_captured(captured_targets, target_identifier):
+                        if not is_target_not_yet_captured(captured_targets, target_identifier):
                             continue
 
                         if object_key not in saved_objects:
@@ -171,7 +173,7 @@ class VideoProcessingCore:
                                 saved_objects[object_key] = True
                                 captured_targets.add(target_identifier)
                                 self.last_screenshot_time[object_type] = current_time
-                                self.last_screenshot[object_type] = original_frame.copy()
+                                #self.last_screenshot[object_type] = original_frame.copy()
 
             return results
         except Exception as e:
@@ -232,12 +234,15 @@ class VideoProcessingCore:
                 return
             try:
                 while True:
+                    # 检查是否需要停止或暂停（无锁快检）
                     with self.pause_stop_lock:
                         if self.stopped:
                             break
-                        if self.paused:
-                            time.sleep(0.1)
-                            continue
+                        should_wait = self.paused
+
+                    if should_wait:
+                        self.resume_event.wait()  # 阻塞直到 resume_event.set()
+                        continue  # 回到循环开头重新检查 stopped
 
                     frames = []
                     original_frames = []
@@ -267,11 +272,12 @@ class VideoProcessingCore:
                             put_success = True
                             break
                         except queue.Full:
-                            time.sleep(0.05)
+                            time.sleep(0.01)
                             continue
                     if not put_success:
                         logging.debug(f"帧队列持续满，跳过 {len(frames)} 帧")
 
+                    # 再次检查是否在读帧期间被停止
                     with self.pause_stop_lock:
                         if self.stopped:
                             break
@@ -288,22 +294,27 @@ class VideoProcessingCore:
         saved_objects = {}
         detection_info = []
         captured_targets = set()
-
         total_duration = None
         last_processed_time = 0.0
 
         try:
             while True:
+                # 检查停止或暂停
                 with self.pause_stop_lock:
                     if self.stopped:
                         break
+                    should_wait = self.paused
+
+                if should_wait:
+                    self.resume_event.wait()
+                    continue  # 重新检查 stopped
 
                 try:
                     item = self.frame_queue.get(timeout=1)
                     if item is None:
                         break
                 except queue.Empty:
-                    break
+                    continue  # 不 break，继续检查暂停/停止
 
                 frames, original_frames, current_times, video_filename, fps = item
 
@@ -330,10 +341,6 @@ class VideoProcessingCore:
                 if self.progress_callback:
                     self.progress_callback(progress)
 
-                with self.pause_stop_lock:
-                    if self.stopped:
-                        break
-
         except Exception as e:
             show_error(f"处理帧时出错: {e}")
         finally:
@@ -342,23 +349,22 @@ class VideoProcessingCore:
         logging.info("帧处理结束")
 
     def start_processing(self, video_path, model, target_classes, class_mapping, save_path, speed_multiplier,
-                         only_movement_targets, start_button, roi_button, next_video_callback, confidence_threshold):
+                        only_movement_targets, start_button, roi_button, confidence_threshold):
+        """
+        启动单个视频的处理流程。此函数会阻塞，直到该视频处理完成或被用户停止。
+        """
         self.video_path_for_progress = video_path
-
-        def on_done():
-            next_video_callback(save_path, target_classes, class_mapping, speed_multiplier, only_movement_targets, confidence_threshold)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             future_read = executor.submit(self.read_frames, video_path, speed_multiplier)
             future_process = executor.submit(self.process_frames, model, target_classes, class_mapping, save_path,
-                                             only_movement_targets, confidence_threshold)
+                                            only_movement_targets, confidence_threshold)
 
             try:
                 concurrent.futures.wait([future_read, future_process], return_when=concurrent.futures.ALL_COMPLETED)
             except Exception as e:
                 show_error(f"处理线程出错: {e}")
-            finally:
-                on_done()
+
 
 
 # YOLO类名列表
@@ -452,10 +458,10 @@ class VideoProcessorGUI:
                 if i * 7 + j < len(yolo_classes):
                     cls = yolo_classes[i * 7 + j]
                     checkbox = ttk.Checkbutton(row_frame, text=cls, variable=self.checkbox_vars[cls])
-                    checkbox.pack(side=ttk.LEFT, padx=5)
+                    checkbox.pack(side='left', padx=5)
         self.select_button = self.create_button(self.object_frame, "全选", self.toggle_select_all, "primary")
-        self.speed_group_frame = ttk.LabelFrame(self.root, text="分析倍速是使用丢帧方式实现，对快速移动目标视频慎用")
-        self.speed_group_frame.pack(pady=5, fill=ttk.X, padx=5)
+        self.speed_group_frame = ttk.Labelframe(self.root, text="分析倍速是使用丢帧方式实现，对快速移动目标视频慎用")
+        self.speed_group_frame.pack(pady=5, fill='x', padx=5)
         self.speed_frame = ttk.Frame(self.speed_group_frame)
         self.speed_frame.pack(pady=2)
         self.speed_var = ttk.IntVar()
@@ -464,11 +470,11 @@ class VideoProcessorGUI:
         speeds = [1, 2, 4, 8, 16, 24, 32, 48, 64]
         for speed in speeds:
             radio = ttk.Radiobutton(self.speed_frame, text=f"{speed}X", variable=self.speed_var, value=speed)
-            radio.pack(side=ttk.LEFT, padx=2)
+            radio.pack(side='left', padx=2)
         self.roi_frame = ttk.Frame(self.root)
         self.roi_frame.pack(pady=2)
         self.roi_button = self.create_button(self.roi_frame, "选择关注区域", self.select_roi, "warning")
-        self.roi_status_label = self.create_label(self.roi_frame, "没有选取关注区域", anchor=ttk.CENTER)
+        self.roi_status_label = self.create_label(self.roi_frame, "没有选取关注区域", anchor='center')
         self.button_frame = ttk.Frame(self.root)
         self.button_frame.pack(pady=2)
         self.start_button = self.create_button(self.button_frame, "开始处理", self.start_processing, "primary")
@@ -478,16 +484,16 @@ class VideoProcessorGUI:
         self.movement_frame.pack(pady=2)
         self.only_movement_var = ttk.BooleanVar(value=True)
         checkbox = ttk.Checkbutton(self.movement_frame, text="只对活动目标截图", variable=self.only_movement_var)
-        checkbox.pack(side=ttk.LEFT, padx=5)
+        checkbox.pack(side='left', padx=5)
         self.note_frame = ttk.Frame(self.root)
         self.note_frame.pack(pady=2)
-        self.create_label(self.note_frame, "注意：分析过程中不要关闭程序，在弹出【视频分析已结束】窗口后再关闭。", anchor=ttk.CENTER)
+        self.create_label(self.note_frame, "注意：分析过程中不要关闭程序，在弹出【视频分析已结束】窗口后再关闭。", anchor='center')
         Progress_frame = ttk.Frame(self.root)
-        Progress_frame.pack(pady=0, padx=5, fill=ttk.X)
+        Progress_frame.pack(pady=0, padx=5, fill='x')
         self.progress_label = ttk.Label(Progress_frame, text="等待处理视频")
-        self.progress_label.pack(pady=5, fill=ttk.X)
-        self.progress_bar = ttk.Progressbar(Progress_frame, orient=ttk.HORIZONTAL, mode='determinate')
-        self.progress_bar.pack(pady=5, fill=ttk.X, expand=True)
+        self.progress_label.pack(pady=5, fill='x')
+        self.progress_bar = ttk.Progressbar(Progress_frame, orient='horizontal', mode='determinate')
+        self.progress_bar.pack(pady=5, fill='x', expand=True)
 
     def create_frame(self, label_text):
         frame = ttk.Frame(self.root)
@@ -497,12 +503,12 @@ class VideoProcessorGUI:
 
     def create_entry(self, frame):
         entry = ttk.Entry(frame, width=50)
-        entry.pack(side=ttk.LEFT, padx=5)
+        entry.pack(side='left', padx=5)
         return entry
 
     def create_button(self, frame, text, command, bootstyle):
         button = ttk.Button(frame, text=text, command=command, bootstyle=bootstyle)
-        button.pack(side=ttk.LEFT, padx=5)
+        button.pack(side='left', padx=5)
         return button
 
     def create_label(self, frame, text, anchor=None):
@@ -510,7 +516,7 @@ class VideoProcessorGUI:
         if anchor:
             label.pack(anchor=anchor)
         else:
-            label.pack(side=ttk.LEFT, padx=5)
+            label.pack(side='left', padx=5)
         return label
 
     def select_video(self):
@@ -518,7 +524,7 @@ class VideoProcessorGUI:
             self.video_paths = filedialog.askopenfilenames(filetypes=[("视频文件", "*.mp4;*.avi")])
             if self.video_paths:
                 video_paths_str = ", ".join(self.video_paths)
-                self.video_entry.delete(0, ttk.END)
+                self.video_entry.delete(0, 'end')
                 self.video_entry.insert(0, video_paths_str)
         except Exception as e:
             show_error(f"选择视频文件时出错: {e}")
@@ -527,7 +533,7 @@ class VideoProcessorGUI:
         try:
             save_path = filedialog.askdirectory()
             if save_path:
-                self.save_path_entry.delete(0, ttk.END)
+                self.save_path_entry.delete(0, 'end')
                 self.save_path_entry.insert(0, save_path)
         except Exception as e:
             show_error(f"选择保存路径时出错: {e}")
@@ -612,9 +618,9 @@ class VideoProcessorGUI:
         }
         target_classes = [key for key, value in class_mapping.items() if value in selected_classes]
 
-        self.start_button.config(state=ttk.DISABLED)
-        self.roi_button.config(state=ttk.DISABLED)
-        self.pause_button.config(state=ttk.NORMAL)
+        self.start_button.config(state='disabled')
+        self.roi_button.config(state='disabled')
+        self.pause_button.config(state='normal')
         self.current_video_index = 0
         self.processing_finished = False
         with self.core.pause_stop_lock:
@@ -627,8 +633,8 @@ class VideoProcessorGUI:
 
                 def gui_update():
                     logging.info("视频分析已结束")
-                    self.start_button.config(state=ttk.NORMAL)
-                    self.roi_button.config(state=ttk.NORMAL)
+                    self.start_button.config(state='normal')
+                    self.roi_button.config(state='normal')
                     self.progress_bar['value'] = 0
                     self.progress_label.config(text="等待处理视频")
                     messagebox.showinfo("提示", "视频分析已结束！")
@@ -640,27 +646,31 @@ class VideoProcessorGUI:
             while self.current_video_index < total_videos and not self.core.stopped:
                 video_path = self.video_paths[self.current_video_index]
                 video_filename = os.path.basename(video_path)
+
                 self.progress_label.config(
                     text=f"正在处理 ({self.current_video_index + 1}/{total_videos}): {video_filename}"
                 )
                 self.progress_bar['value'] = 0
                 logging.info(f"开始处理视频: {video_path}")
 
-                self.core.start_processing(
-                    video_path=video_path,
-                    model=self.model,
-                    target_classes=target_classes,
-                    class_mapping=class_mapping,
-                    save_path=save_path,
-                    speed_multiplier=speed_multiplier,
-                    only_movement_targets=only_movement_targets,
-                    start_button=self.start_button,
-                    roi_button=self.roi_button,
-                    next_video_callback=lambda *args: None,
-                    confidence_threshold=confidence_threshold
-                )
-
-                self.current_video_index += 1
+                try:
+                    self.core.start_processing(
+                        video_path=video_path,
+                        model=self.model,
+                        target_classes=target_classes,
+                        class_mapping=class_mapping,
+                        save_path=save_path,
+                        speed_multiplier=speed_multiplier,
+                        only_movement_targets=only_movement_targets,
+                        start_button=self.start_button,
+                        roi_button=self.roi_button,
+                        confidence_threshold=confidence_threshold
+                    )
+                except Exception as e:
+                    # 错误处理...直接跳过
+                    pass
+                finally:
+                    self.current_video_index += 1
 
             self.root.after(100, on_all_done)
 
@@ -669,20 +679,24 @@ class VideoProcessorGUI:
     def pause_processing(self):
         with self.core.pause_stop_lock:
             self.core.paused = not self.core.paused
-        if self.core.paused:
-            self.pause_button.config(text="继续处理")
-        else:
-            self.pause_button.config(text="暂停处理")
+            if self.core.paused:
+                self.core.resume_event.clear()  # 进入暂停
+                self.pause_button.config(text="继续处理")
+            else:
+                self.core.resume_event.set()    # 恢复执行
+                self.pause_button.config(text="暂停处理")
 
     def stop_processing(self):
         with self.core.pause_stop_lock:
             self.core.stopped = True
             self.core.paused = False
-            self.pause_button.config(state=ttk.DISABLED)
-            self.start_button.config(state=ttk.NORMAL)
-            self.roi_button.config(state=ttk.NORMAL)
+            self.core.resume_event.set()  # 唤醒等待中的线程
+            self.pause_button.config(state='disabled')
+            self.start_button.config(state='normal')
+            self.roi_button.config(state='normal')
             self.current_video_index = 0
 
+        # 清空队列
         while not self.core.frame_queue.empty():
             try:
                 self.core.frame_queue.get_nowait()
@@ -791,7 +805,7 @@ if __name__ == "__main__":
     # 配置日志
     logging.getLogger("ultralytics").setLevel(logging.INFO)
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s',
-                        filename='video_analysis.log')
+                        filename='video_analysis.log', filemode='w')
 
     root = ttk.Window(themename='darkly')
     root.title("COCO数据集目标检测 by geckotao")
