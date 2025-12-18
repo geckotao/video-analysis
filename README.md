@@ -3,6 +3,7 @@ COCO数据集目标检测
 这是一款基于 YOLOv11 和 OpenCV 开发的视频目标检测与截图工具，具备可视化操作界面，支持批量视频处理、ROI 区域选择、移动目标过滤、多倍速分析等功能。工具能够自动检测视频中的指定目标，对符合条件的目标进行截图保存，并采用 ROI 首次进入去重策略减少重复截图，并支持 GPU 加速以提升处理效率。
 
 安装依赖包
+
 pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu126 
 
 pip install ttkbootstrap opencv-python numpy ultralytics  configparser pillow 
