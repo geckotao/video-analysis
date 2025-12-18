@@ -4,6 +4,7 @@ COCO数据集目标检测
 
 安装依赖包
 pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu126 
+
 pip install ttkbootstrap opencv-python numpy ultralytics  configparser pillow 
 
  下载 YOLO 模型
