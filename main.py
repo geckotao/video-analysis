@@ -67,16 +67,31 @@ def calculate_iou(box1, box2):
     union_area = area1 + area2 - inter_area
     return inter_area / union_area
 
-# 检查目标是否已被捕获的函数
-def is_target_not_yet_captured(captured_targets, target_identifier):
-    return target_identifier not in captured_targets
+# 保存检测截图的函数（全画面 + 可选标注）
+def save_detection_screenshot(original_frame, save_path, video_filename, frame_number, object_type, saved_objects_count, confidence, boxes_info=None, annotate=False):
+    """
+    boxes_info: [(x1, y1, x2, y2, cls_en, conf), ...] 用于标注
+    annotate: 是否在图像上绘制框和标签
+    """
+    frame_to_save = original_frame.copy()
 
-# 保存检测截图的函数（全画面）
-def save_detection_screenshot(original_frame, save_path, video_filename, frame_number, object_type, saved_objects_count, confidence):
+    if annotate and boxes_info:
+        # 定义一组颜色（BGR）
+        colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (0, 255, 255), (255, 0, 255), (128, 0, 128)]
+        for (x1, y1, x2, y2, cls_en, conf) in boxes_info:
+            color = colors[hash(str(cls_en)) % len(colors)]
+            # 绘制矩形框
+            cv2.rectangle(frame_to_save, (x1, y1), (x2, y2), color, 2)
+            # 绘制标签
+            label = f"{cls_en} {conf:.2f}"
+            (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            cv2.rectangle(frame_to_save, (x1, y1 - h - 5), (x1 + w, y1), color, -1)
+            cv2.putText(frame_to_save, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
     file_name = os.path.join(save_path,
                              f"{object_type}_{os.path.splitext(video_filename)[0]}_{saved_objects_count}.jpg")
     try:
-        cv2.imwrite(file_name, original_frame)
+        cv2.imwrite(file_name, frame_to_save)
         return True
     except Exception as e:
         logging.error(f"保存截图时出错: {e}")
@@ -111,69 +126,85 @@ class VideoProcessingCore:
         self.pause_stop_lock = Lock()
         self.resume_event = threading.Event()
         self.resume_event.set()  # 初始为运行状态
-        self.last_screenshot_time = {}
-        self.last_screenshot = {}
-        self.roi_points = []  #ROI 点（跨视频保留）
-        self.progress_callback = progress_callback
-        self.video_path_for_progress = None
 
         # 移动目标优化
         self.prev_positions = {}
         self.movement_buffer = {}
         self.stable_since = {}
 
+        # ROI 首次进入目标跟踪（核心新增）
+        self.roi_entered_boxes = []  # [(box, cls_id, enter_time), ...]
+        self.roi_lock = Lock()
+
+        # 其他
+        self.roi_points = []  # ROI 点（跨视频保留）
+        self.progress_callback = progress_callback
+        self.video_path_for_progress = None
+
     def detect_and_save(self, frames, original_frames, model, target_classes, class_mapping, current_times, save_path,
-                        saved_objects, detection_info, only_movement_targets, captured_targets,
-                        video_filename, fps, confidence_threshold):
+                        detection_info, only_movement_targets, video_filename, fps, confidence_threshold,
+                        annotate_on_screenshot=False):
         try:
-            # 使用原始帧进行检测
             results = model(frames, verbose=False)
 
             for i, result in enumerate(results):
                 boxes = result.boxes
                 current_time = current_times[i]
-                original_frame = original_frames[i]  #截图用全画面
+                original_frame = original_frames[i]
 
                 for box in boxes:
                     cls_id = int(box.cls[0])
-                    confidence = float(box.conf[0])
-                    if cls_id in target_classes and confidence >= confidence_threshold:
-                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
-                        object_key = f"{cls_id}_{x1}_{y1}_{x2}_{y2}"
-                        object_type = class_mapping[cls_id]
-                        current_box = (x1, y1, x2, y2)
+                    conf = float(box.conf[0])
+                    if cls_id not in target_classes or conf < confidence_threshold:
+                        continue
 
-                        # 移动判断（可选）
-                        if only_movement_targets:
-                            if not self.is_target_moving_enhanced(object_key, current_box, current_time):
-                                continue
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
+                    current_box = (x1, y1, x2, y2)
 
-                        self.prev_positions[object_key] = current_box
+                    # ROI 检查
+                    in_roi = True
+                    if self.roi_points:
+                        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                        try:
+                            in_roi = point_in_polygon(cx, cy, self.roi_points)
+                        except Exception as e:
+                            logging.warning(f"ROI 检测失败: {e}")
+                            in_roi = False
+                    if not in_roi:
+                        continue
 
-                        # 使用纯 Python 射线法判断目标是否在 ROI 内
-                        if self.roi_points:
-                            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-                            try:
-                                if not point_in_polygon(cx, cy, self.roi_points):
-                                    continue  # 点不在 ROI 内
-                            except Exception as e:
-                                logging.warning(f"ROI 检测失败: {e}")
-                                continue
-
-                        target_identifier = f"{cls_id}_{round(x1 / 10)}_{round(y1 / 10)}_{round(x2 / 10)}_{round(y2 / 10)}"
-                        if not is_target_not_yet_captured(captured_targets, target_identifier):
+                    # 移动性检查
+                    obj_key = f"{cls_id}_{x1}_{y1}_{x2}_{y2}"
+                    if only_movement_targets:
+                        if not self.is_target_moving_enhanced(obj_key, current_box, current_time):
                             continue
 
-                        if object_key not in saved_objects:
-                            info = f"{object_type} 在 {current_time:.2f} 秒时出现在位置: ({x1}, {y1}), ({x2}, {y2})，置信度: {confidence:.2f}"
-                            detection_info.append(info)
-                            frame_number = int(current_time * fps)
-                            if save_detection_screenshot(original_frame, save_path, video_filename, frame_number, object_type,
-                                                         len(saved_objects), confidence):
-                                saved_objects[object_key] = True
-                                captured_targets.add(target_identifier)
-                                self.last_screenshot_time[object_type] = current_time
-                                #self.last_screenshot[object_type] = original_frame.copy()
+                    # === 核心：IoU 去重 + 首次进入 ROI ===
+                    should_capture = True
+                    with self.roi_lock:
+                        # 检查是否与已记录的 ROI 内目标高度重合
+                        for recorded_box, recorded_cls, _ in self.roi_entered_boxes:
+                            if recorded_cls == cls_id and calculate_iou(current_box, recorded_box) > roi_iou_threshold:
+                                should_capture = False
+                                break
+
+                        if should_capture:
+                            # 记录该目标（即使后续移动，也视为已进入）
+                            self.roi_entered_boxes.append((current_box, cls_id, current_time))
+
+                    if should_capture:
+                        object_type = class_mapping[cls_id]
+                        frame_number = int(current_time * fps)
+                        cls_en = coco_classes_en[cls_id] if cls_id < len(coco_classes_en) else "unknown"
+                        box_info = [(x1, y1, x2, y2, cls_en, conf)]
+
+                        count_for_cls = len([b for b, c, t in self.roi_entered_boxes if c == cls_id])
+                        if save_detection_screenshot(
+                            original_frame, save_path, video_filename, frame_number,
+                            object_type, count_for_cls + 1, conf,
+                            boxes_info=box_info, annotate=annotate_on_screenshot
+                        ):
+                            detection_info.append(f"{object_type} 在 {current_time:.2f} 秒首次进入ROI，置信度: {conf:.2f}")
 
             return results
         except Exception as e:
@@ -288,18 +319,40 @@ class VideoProcessingCore:
                 if not self.stopped:
                     self.frame_queue.put(None)
         logging.info(f"视频读取结束: {video_path}")
+        
 
-    def process_frames(self, model, target_classes, class_mapping, save_path, only_movement_targets, confidence_threshold):
+    def start_processing(self, video_path, model, target_classes, class_mapping, save_path, speed_multiplier,
+                        only_movement_targets, start_button, roi_button, confidence_threshold, annotate_on_screenshot=False):
+        """
+        启动单个视频的处理流程。
+        """
+        with self.roi_lock:
+            self.roi_entered_boxes.clear()
+
+        self.video_path_for_progress = video_path
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            future_read = executor.submit(self.read_frames, video_path, speed_multiplier)
+            future_process = executor.submit(
+                self.process_frames, model, target_classes, class_mapping, save_path,
+                only_movement_targets, confidence_threshold, annotate_on_screenshot
+            )
+
+            try:
+                concurrent.futures.wait([future_read, future_process], return_when=concurrent.futures.ALL_COMPLETED)
+            except Exception as e:
+                show_error(f"处理线程出错: {e}")
+
+
+    def process_frames(self, model, target_classes, class_mapping, save_path, only_movement_targets, confidence_threshold, annotate_on_screenshot=False):
         logging.info("开始处理帧")
         saved_objects = {}
         detection_info = []
-        captured_targets = set()
         total_duration = None
         last_processed_time = 0.0
 
         try:
             while True:
-                # 检查停止或暂停
                 with self.pause_stop_lock:
                     if self.stopped:
                         break
@@ -307,21 +360,22 @@ class VideoProcessingCore:
 
                 if should_wait:
                     self.resume_event.wait()
-                    continue  # 重新检查 stopped
+                    continue
 
                 try:
                     item = self.frame_queue.get(timeout=1)
                     if item is None:
                         break
                 except queue.Empty:
-                    continue  # 不 break，继续检查暂停/停止
+                    continue
 
                 frames, original_frames, current_times, video_filename, fps = item
 
                 self.detect_and_save(
                     frames, original_frames, model, target_classes, class_mapping,
-                    current_times, save_path, saved_objects, detection_info,
-                    only_movement_targets, captured_targets, video_filename, fps, confidence_threshold
+                    current_times, save_path, detection_info,
+                    only_movement_targets, video_filename, fps, confidence_threshold,
+                    annotate_on_screenshot=annotate_on_screenshot
                 )
 
                 if current_times:
@@ -331,8 +385,8 @@ class VideoProcessingCore:
                     with VideoCaptureContextManager(self.video_path_for_progress) as cap:
                         if cap.isOpened():
                             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                            fps = cap.get(cv2.CAP_PROP_FPS)
-                            total_duration = total_frames / fps if fps > 0 else 1.0
+                            fps_val = cap.get(cv2.CAP_PROP_FPS)
+                            total_duration = total_frames / fps_val if fps_val > 0 else 1.0
                         else:
                             total_duration = 100.0
 
@@ -348,25 +402,6 @@ class VideoProcessingCore:
                 self.progress_callback(100)
         logging.info("帧处理结束")
 
-    def start_processing(self, video_path, model, target_classes, class_mapping, save_path, speed_multiplier,
-                        only_movement_targets, start_button, roi_button, confidence_threshold):
-        """
-        启动单个视频的处理流程。此函数会阻塞，直到该视频处理完成或被用户停止。
-        """
-        self.video_path_for_progress = video_path
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            future_read = executor.submit(self.read_frames, video_path, speed_multiplier)
-            future_process = executor.submit(self.process_frames, model, target_classes, class_mapping, save_path,
-                                            only_movement_targets, confidence_threshold)
-
-            try:
-                concurrent.futures.wait([future_read, future_process], return_when=concurrent.futures.ALL_COMPLETED)
-            except Exception as e:
-                show_error(f"处理线程出错: {e}")
-
-
-
 # YOLO类名列表
 yolo_classes = [
     "人", "自行车", "小车", "摩托车", "飞机", "巴士", "火车", "货车", "船", "交通灯", "消防栓",
@@ -378,7 +413,18 @@ yolo_classes = [
     "马桶", "电视", "笔记本电脑", "鼠标", "遥控器", "键盘", "手机", "微波炉", "烤箱", "烤面包机",
     "水槽", "冰箱", "书", "时钟", "花瓶", "剪刀", "泰迪熊", "吹风机", "牙刷"
 ]
-
+# COCO 数据集英文类别（与 YOLO 官方一致）
+coco_classes_en = [
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
+    "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
+    "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
+    "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard",
+    "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+    "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
+    "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone",
+    "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
+    "hair drier", "toothbrush"
+]
 # 检查多边形是否封闭的函数
 def is_polygon_closed(roi_points):
     if len(roi_points) >= 3:
@@ -480,11 +526,18 @@ class VideoProcessorGUI:
         self.start_button = self.create_button(self.button_frame, "开始处理", self.start_processing, "primary")
         self.pause_button = self.create_button(self.button_frame, "暂停处理", self.pause_processing, "secondary")
         self.create_button(self.button_frame, "结束处理", self.stop_processing, "danger")
-        self.movement_frame = ttk.Frame(self.root)
-        self.movement_frame.pack(pady=2)
+
+        self.option_frame = ttk.Frame(self.root)
+        self.option_frame.pack(pady=2)
+
         self.only_movement_var = ttk.BooleanVar(value=True)
-        checkbox = ttk.Checkbutton(self.movement_frame, text="只对活动目标截图", variable=self.only_movement_var)
-        checkbox.pack(side='left', padx=5)
+        movement_checkbox = ttk.Checkbutton(self.option_frame, text="只对活动目标截图", variable=self.only_movement_var)
+        movement_checkbox.pack(side='left', padx=5)
+
+        self.annotate_var = ttk.BooleanVar(value=False)
+        annotate_checkbox = ttk.Checkbutton(self.option_frame, text="标注目标", variable=self.annotate_var)
+        annotate_checkbox.pack(side='left', padx=5)
+
         self.note_frame = ttk.Frame(self.root)
         self.note_frame.pack(pady=2)
         self.create_label(self.note_frame, "注意：分析过程中不要关闭程序，在弹出【视频分析已结束】窗口后再关闭。", anchor='center')
@@ -589,6 +642,7 @@ class VideoProcessorGUI:
         selected_classes = self.get_selected_classes()
         speed_multiplier = self.speed_var.get()
         only_movement_targets = self.only_movement_var.get()
+        annotate_on_screenshot = self.annotate_var.get()
 
         if not self.video_paths or not save_path:
             show_error("请选择视频文件和截图保存路径")
@@ -664,7 +718,8 @@ class VideoProcessorGUI:
                         only_movement_targets=only_movement_targets,
                         start_button=self.start_button,
                         roi_button=self.roi_button,
-                        confidence_threshold=confidence_threshold
+                        confidence_threshold=confidence_threshold,
+                        annotate_on_screenshot=annotate_on_screenshot
                     )
                 except Exception as e:
                     # 错误处理...直接跳过
@@ -773,39 +828,94 @@ class VideoProcessorGUI:
         self.roi_status_label.config(text="未选取关注区域")
         self.roi_button.config(text="选取关注区域", command=self.select_roi)
 
-
 if __name__ == "__main__":
-    # 读取配置文件
     config = configparser.ConfigParser()
-    try:
-        config.read('set.ini')
-        BATCH_SIZE = get_config_value(config, 'Parameters', 'batch_size', 2)
-        FRAME_QUEUE_SIZE = get_config_value(config, 'Parameters', 'frame_queue_size', 30)
-        RESULT_QUEUE_SIZE = get_config_value(config, 'Parameters', 'result_queue_size', 15)
-        target_moving = get_config_value(config, 'Parameters', 'target_moving', 5)
-        confidence_threshold = get_config_value(config, 'Parameters', 'confidence_threshold', 0.3)
 
-        movement_iou_threshold = get_config_value(config, 'target', 'movement_iou_threshold', 0.95)
-        movement_relative_threshold = get_config_value(config, 'target', 'movement_relative_threshold', 0.02)
-        movement_consecutive_frames = get_config_value(config, 'target', 'movement_consecutive_frames', 5)
-        movement_stable_seconds = get_config_value(config, 'target', 'movement_stable_seconds', 5)
+    # 默认参数（无论是否读取成功都可用）
+    DEFAULT_PARAMS = {
+        'batch_size': 2,
+        'frame_queue_size': 10,
+        'confidence_threshold': 0.3,
+        'roi_iou_threshold': 0.20,
+        'movement_iou_threshold': 0.90,
+        'movement_relative_threshold': 0.02,
+        'movement_consecutive_frames': 5,
+        'movement_stable_seconds': 5,
+        'model_path': './models/yolo11x.pt'
+    }
 
-    except FileNotFoundError:
-        show_error("未找到set.ini文件,将使用默认配置参数运行")
-        BATCH_SIZE = 2
-        FRAME_QUEUE_SIZE = 30
-        RESULT_QUEUE_SIZE = 15
-        target_moving = 5
-        confidence_threshold = 0.3
-        movement_iou_threshold = 0.95
-        movement_relative_threshold = 0.02
-        movement_consecutive_frames = 2
-        movement_stable_seconds = 5
+    # 尝试读取或创建 set.ini
+    config_created = False
+    if not os.path.exists('set.ini'):
+        try:
+            # 写入默认配置
+            config['Parameters'] = {
+                'batch_size': str(DEFAULT_PARAMS['batch_size']),
+                'frame_queue_size': str(DEFAULT_PARAMS['frame_queue_size']),
+                'confidence_threshold': str(DEFAULT_PARAMS['confidence_threshold']),
+                'roi_iou_threshold': str(DEFAULT_PARAMS['roi_iou_threshold'])
+            }
+            config['target'] = {
+                'movement_iou_threshold': str(DEFAULT_PARAMS['movement_iou_threshold']),
+                'movement_relative_threshold': str(DEFAULT_PARAMS['movement_relative_threshold']),
+                'movement_consecutive_frames': str(DEFAULT_PARAMS['movement_consecutive_frames']),
+                'movement_stable_seconds': str(DEFAULT_PARAMS['movement_stable_seconds'])
+            }
+            config['Model'] = {
+                'model_path': DEFAULT_PARAMS['model_path']
+            }
+            with open('set.ini', 'w', encoding='utf-8') as f:
+                config.write(f)
+            logging.info("set.ini 已成功生成。")
+            config_created = True
+        except Exception as e:
+            # 无法创建配置文件，记录日志并提示用户
+            logging.warning(f"无法创建 set.ini: {e}")
+            messagebox.showwarning("提示", 
+                "无法自动创建配置文件 set.ini（可能无写入权限）。\n"
+                "程序将使用默认参数运行。\n"
+                "如需自定义设置，请手动创建 set.ini 文件。")
+    else:
+        try:
+            config.read('set.ini', encoding='utf-8')
+        except Exception as e:
+            logging.error(f"读取 set.ini 失败: {e}")
+            messagebox.showerror("错误", f"读取 set.ini 出错：{e}\n将使用默认参数。")
 
-    # 配置日志
-    logging.getLogger("ultralytics").setLevel(logging.INFO)
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s',
-                        filename='video_analysis.log', filemode='w')
+    # 安全地获取参数（优先从 config 读，失败则用默认值）
+    def safe_get(section, option, default):
+        try:
+            if config.has_section(section) and config.has_option(section, option):
+                value = config.get(section, option)
+                if isinstance(default, int):
+                    return int(value)
+                elif isinstance(default, float):
+                    return float(value)
+                else:
+                    return value
+        except Exception as e:
+            logging.warning(f"读取配置 {section}.{option} 失败，使用默认值: {default}")
+        return default
+
+    BATCH_SIZE = safe_get('Parameters', 'batch_size', DEFAULT_PARAMS['batch_size'])
+    FRAME_QUEUE_SIZE = safe_get('Parameters', 'frame_queue_size', DEFAULT_PARAMS['frame_queue_size'])
+    confidence_threshold = safe_get('Parameters', 'confidence_threshold', DEFAULT_PARAMS['confidence_threshold'])
+    roi_iou_threshold = safe_get('Parameters', 'roi_iou_threshold', DEFAULT_PARAMS['roi_iou_threshold'])
+
+    movement_iou_threshold = safe_get('target', 'movement_iou_threshold', DEFAULT_PARAMS['movement_iou_threshold'])
+    movement_relative_threshold = safe_get('target', 'movement_relative_threshold', DEFAULT_PARAMS['movement_relative_threshold'])
+    movement_consecutive_frames = safe_get('target', 'movement_consecutive_frames', DEFAULT_PARAMS['movement_consecutive_frames'])
+    movement_stable_seconds = safe_get('target', 'movement_stable_seconds', DEFAULT_PARAMS['movement_stable_seconds'])
+   
+    # 同时输出到控制台和文件（确保调试时能看到错误）
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler('video_analysis.log', encoding='utf-8', mode='w'),
+            logging.StreamHandler(sys.stdout)  # 输出到控制台
+        ]
+    )
 
     root = ttk.Window(themename='darkly')
     root.title("COCO数据集目标检测 by geckotao")
