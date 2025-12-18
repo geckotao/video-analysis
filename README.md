@@ -9,7 +9,7 @@ pip install ttkbootstrap opencv-python numpy ultralytics  configparser pillow
  下载 YOLO 模型
 创建models文件夹
 下载 YOLOv11 模型文件（yolo11x.pt）到 models 文件夹
-官方下载地址：https://github.com/ultralytics/assets/releases
+官方下载地址：https://github.com/ultralytics/ultralytics
 或使用其他 YOLOv11 模型（yolo11n.pt/yolo11s.pt/yolo11m.pt/yolo11l.pt）
 
 配置文件设置（可选）
