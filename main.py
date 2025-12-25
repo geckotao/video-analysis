@@ -1,225 +1,933 @@
-# 导入依赖库
-import ttkbootstrap as ttk  # 增强版Tkinter，提供现代化UI组件
-import sys  # 系统相关操作（如获取程序运行路径）
-import os  # 文件路径与目录操作
-import cv2  # OpenCV库，用于视频读取和图像处理
-import numpy as np  # 数值计算库，用于数组操作
-from ultralytics import YOLO  # YOLO目标检测模型库
-import time  # 时间相关操作（如延时、计时）
-import logging  # 日志记录，用于调试和错误追踪
-from threading import Lock, Thread  # 线程锁和线程类，实现多线程处理
-import threading  # threading线程
-from queue import Queue  # 队列，用于线程间数据传递
-import queue  # 队列相关异常处理
-from tkinter import filedialog, messagebox  # Tkinter文件选择和消息弹窗
-import configparser  # 配置文件解析器，读取set.ini配置
-import concurrent.futures  # 高级线程池，管理多线程任务
-import torch
+import tkinter as tk
+from tkinter import filedialog, IntVar, messagebox
+import cv2
+import os
+import threading
+import queue
+import time
+import numpy as np
+import configparser
+import traceback
+from PIL import Image, ImageTk
+import sys
+import datetime
+import unicodedata
+import re
+# 导入ttkbootstrap核心组件
+import ttkbootstrap as ttk
+from ttkbootstrap.constants import *
+from ttkbootstrap.widgets.scrolled import ScrolledFrame, ScrolledText
+from ttkbootstrap.dialogs import Messagebox
 
-# 读取配置文件的函数
-def get_config_value(config, section, option, default):
-    try:
-        value = config.get(section, option)
-        if isinstance(default, int):
-            return int(value)
-        elif isinstance(default, float):
-            return float(value)
-        return value
-    except (configparser.NoSectionError, configparser.NoOptionError, ValueError):
-        show_error(f"读取set.ini中 {section}.{option} 出错,将使用默认值 {default}")
-        return default
+# 尝试导入 pynvml 用于 GPU 监控
+try:
+    import pynvml
+    PYNVML_AVAILABLE = True
+except ImportError:
+    PYNVML_AVAILABLE = False
 
-# 射线法判断点是否在多边形内
-def point_in_polygon(x, y, poly):
-    """
-    使用射线法判断点 (x,y) 是否在多边形 poly 内
-    poly: [(x1,y1), (x2,y2), ...]
-    返回: True/False
-    """
-    n = len(poly)
-    inside = False
-    p1x, p1y = poly[0]
-    for i in range(1, n + 1):
-        p2x, p2y = poly[i % n]
-        if y > min(p1y, p2y):
-            if y <= max(p1y, p2y):
-                if x <= max(p1x, p2x):
-                    if p1y != p2y:
-                        xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
-                    if p1x == p2x or x <= xinters:
-                        inside = not inside
-        p1x, p1y = p2x, p2y
-    return inside
+# 安全文件名清洗
+def sanitize_filename(filename: str) -> str:
+    cleaned = "".join(c for c in filename if unicodedata.category(c) not in ("Cc", "Cf") and c not in r'<>:"/\|?*')
+    cleaned = re.sub(r'\s+', '_', cleaned.strip())
+    return cleaned[:100] or "unnamed"
 
-# 计算 IOU（交并比）
-def calculate_iou(box1, box2):
-    x1, y1, x2, y2 = box1
-    x1_p, y1_p, x2_p, y2_p = box2
-    inter_x1 = max(x1, x1_p)
-    inter_y1 = max(y1, y1_p)
-    inter_x2 = min(x2, x2_p)
-    inter_y2 = min(y2, y2_p)
-    if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
-        return 0.0
-    inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
-    area1 = (x2 - x1) * (y2 - y1)
-    area2 = (x2_p - x1_p) * (y2_p - y1_p)
-    union_area = area1 + area2 - inter_area
-    return inter_area / union_area
+# 全局异常捕获
+def setup_exception_logging():
+    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, "app_crash.log")
+    def handle_exception(exc_type, exc_value, exc_traceback):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            return
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write("="*50 + "\n")
+            f.write(f"崩溃时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            traceback.print_exception(exc_type, exc_value, exc_traceback, file=f)
+            f.write("="*50 + "\n")
+        messagebox.showerror("程序崩溃", f"程序启动失败，详细日志已保存到:\n{log_path}\n请检查日志或联系开发者。")
+        sys.exit(1)
+    sys.excepthook = handle_exception
+setup_exception_logging()
 
-# 保存检测截图的函数（全画面 + 可选标注）
-def save_detection_screenshot(original_frame, save_path, video_filename, frame_number, object_type, saved_objects_count, confidence, boxes_info=None, annotate=False):
-    """
-    boxes_info: [(x1, y1, x2, y2, cls_en, conf), ...] 用于标注
-    annotate: 是否在图像上绘制框和标签
-    """
-    frame_to_save = original_frame.copy()
 
-    if annotate and boxes_info:
-        # 定义一组颜色（BGR）
-        colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (0, 255, 255), (255, 0, 255), (128, 0, 128)]
-        for (x1, y1, x2, y2, cls_en, conf) in boxes_info:
-            color = colors[hash(str(cls_en)) % len(colors)]
-            # 绘制矩形框
-            cv2.rectangle(frame_to_save, (x1, y1), (x2, y2), color, 2)
-            # 绘制标签
-            label = f"{cls_en} {conf:.2f}"
-            (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-            cv2.rectangle(frame_to_save, (x1, y1 - h - 5), (x1 + w, y1), color, -1)
-            cv2.putText(frame_to_save, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+# 类别与颜色 
+COCO_CLASS_MAPPING = {
+    'person': '人', 'bicycle': '自行车', 'car': '小车', 'motorcycle': '摩托车',
+    'airplane': '飞机', 'bus': '客车', 'train': '火车', 'truck': '货车', 'boat': '船',
+    'traffic light': '交通灯', 'fire hydrant': '消防栓', 'stop sign': '停车标志',
+    'parking meter': '停车计时器', 'bench': '长椅', 'bird': '鸟', 'cat': '猫', 'dog': '狗',
+    'horse': '马', 'sheep': '羊', 'cow': '牛', 'elephant': '大象', 'bear': '熊',
+    'zebra': '斑马', 'giraffe': '长颈鹿', 'backpack': '背包', 'umbrella': '雨伞',
+    'handbag': '手提包', 'tie': '领带', 'suitcase': '行李箱', 'frisbee': '飞盘',
+    'skis': '滑雪板', 'snowboard': '滑雪板', 'sports ball': '球类', 'kite': '风筝',
+    'baseball bat': '棒球棒', 'baseball glove': '棒球手套', 'skateboard': '滑板',
+    'surfboard': '冲浪板', 'tennis racket': '网球拍', 'bottle': '瓶子',
+    'wine glass': '酒杯', 'cup': '杯子', 'fork': '叉子', 'knife': '刀', 'spoon': '勺子',
+    'bowl': '碗', 'banana': '香蕉', 'apple': '苹果', 'sandwich': '三明治', 'orange': '橙子',
+    'broccoli': '西兰花', 'carrot': '胡萝卜', 'hot dog': '热狗', 'pizza': '披萨',
+    'donut': '甜甜圈', 'cake': '蛋糕', 'chair': '椅子', 'couch': '沙发', 'potted plant': '盆栽',
+    'bed': '床', 'dining table': '餐桌', 'toilet': '马桶', 'tv': '电视', 'laptop': '笔记本电脑',
+    'mouse': '鼠标', 'remote': '遥控器', 'keyboard': '键盘', 'cell phone': '手机',
+    'microwave': '微波炉', 'oven': '烤箱', 'toaster': '烤面包机', 'sink': '水槽',
+    'refrigerator': '冰箱', 'book': '书', 'clock': '时钟', 'vase': '花瓶', 'scissors': '剪刀',
+    'teddy bear': '泰迪熊', 'hair drier': '吹风机', 'toothbrush': '牙刷'
+}
+COCO_CLASSES = list(COCO_CLASS_MAPPING.keys())
+COLORS = [
+    (255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255), (0, 255, 255),
+    (128, 0, 0), (0, 128, 0), (0, 0, 128), (128, 128, 0), (128, 0, 128), (0, 128, 255),
+    (255, 128, 0), (255, 0, 128), (0, 255, 128), (128, 255, 0), (128, 0, 255), (0, 128, 255)
+]
+NMS_IOU_THRESHOLD_DEFAULT = 0.45
 
-    file_name = os.path.join(save_path,
-                             f"{object_type}_{os.path.splitext(video_filename)[0]}_{saved_objects_count}.jpg")
-    try:
-        cv2.imwrite(file_name, frame_to_save)
-        return True
-    except Exception as e:
-        logging.error(f"保存截图时出错: {e}")
-        return False
+# 导入Ultralytics、PyTorch依赖 
+try:
+    import torch
+    from ultralytics import YOLO
+    ULTRALYTICS_AVAILABLE = True
+    if torch.cuda.is_available():
+        try:
+            CUDA_STREAM = torch.cuda.Stream()
+        except:
+            CUDA_STREAM = None
+    else:
+        CUDA_STREAM = None
+except ImportError:
+    ULTRALYTICS_AVAILABLE = False
+    CUDA_STREAM = None
+    Messagebox.showerror("依赖缺失", "缺少 Ultralytics 或 PyTorch！请安装：pip install ultralytics torch")
 
-# 显示错误信息的函数
-def show_error(message):
-    messagebox.showerror("错误", message)
-    logging.error(message)
+class VideoDetectionApp:
+    def __init__(self, root: ttk.Window):
+        self.root = root
+        self.root.title("视频目标检测截图工具 by geckotao")
+        self.root.geometry("1200x800")
+        self.root.resizable(True, True)
 
-# 视频捕获上下文管理器类
-class VideoCaptureContextManager:
-    def __init__(self, video_path):
-        self.video_path = video_path
-        self.cap = None
-
-    def __enter__(self):
-        self.cap = cv2.VideoCapture(self.video_path)
-        return self.cap
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.cap is not None:
-            self.cap.release()
-
-# 视频处理核心类
-class VideoProcessingCore:
-    def __init__(self, progress_callback=None):
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.ico")
+        if os.path.exists(icon_path):
+            try:
+                self.root.iconbitmap(icon_path)
+            except Exception as e:
+                print(f"[WARN] 无法加载图标: {e}")
+        self._log_buffer = []
+        self._ui_ready = False
+        self.log_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "app_runtime.log")
+        os.makedirs(os.path.dirname(self.log_file_path), exist_ok=True)
+        self.save_folder = ""
+        self.roi = None
         self.paused = False
         self.stopped = False
-        self.frame_queue = Queue(maxsize=FRAME_QUEUE_SIZE)
-        self.lock = Lock()
-        self.pause_stop_lock = Lock()
-        self.resume_event = threading.Event()
-        self.resume_event.set()  # 初始为运行状态
+        self.model = None
+        self.class_names = {i: name for i, name in enumerate(COCO_CLASSES)}
+        self.class_vars = []
+        self.current_processing_status = ""
 
-        # 移动目标优化
-        self.prev_positions = {}
-        self.movement_buffer = {}
-        self.stable_since = {}
+        # 同步预览相关变量 
+        self._preview_window = None
+        self._preview_queue = queue.Queue(maxsize=2)
+        self._preview_annotate_queue = queue.Queue(maxsize=2)
+        self._preview_active = False
+        self._preview_label = None  # 嵌入界面的预览标签（不再是窗口）
+        self._current_preview_photo = None  # 保留预览图像引用，防止被回收
+        self._preview_placeholder_text = "等待视频帧数据..."
+        self.current_frame = 0
+        self.total_frames = 0
+        self._current_file_idx = -1
+        self.progress_lock = threading.Lock()
+        self.paused_display = False 
 
-        # ROI 首次进入目标跟踪（核心新增）
-        self.roi_entered_boxes = []  # [(box, cls_id, enter_time), ...]
-        self.roi_lock = Lock()
 
-        # 其他
-        self.roi_points = []  # ROI 点（跨视频保留）
-        self.progress_callback = progress_callback
-        self.video_path_for_progress = None
+        # 统计数据
+        self.stats = {
+            'fps': 0.0,
+            'total_targets': 0,
+            'targets_by_class': {},
+            'gpu_mem': 'N/A'
+        }
 
-    def detect_and_save(self, frames, original_frames, model, target_classes, class_mapping, current_times, save_path,
-                        detection_info, only_movement_targets, video_filename, fps, confidence_threshold,
-                        annotate_on_screenshot=False):
+        # 多线程保存队列
+        self.save_queue = queue.Queue(maxsize=100)
+        self.save_thread = threading.Thread(target=self._save_worker, daemon=True)
+        self.save_thread.start()
+
+        # 初始化 pynvml
+        if PYNVML_AVAILABLE and torch.cuda.is_available():
+            try:
+                pynvml.nvmlInit()
+                self.gpu_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            except:
+                self.gpu_handle = None
+        else:
+            self.gpu_handle = None
+
+        if not self.load_configuration():
+            return
+        if not self.load_model():
+            return
+        self.setup_ui()
+        self.update_stats_periodically()
+
+    def _save_worker(self):
+        """独立线程：异步保存截图"""
+        while True:
+            try:
+                task = self.save_queue.get()
+                if task is None:
+                    break
+                image, save_path = task
+                os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                Image.fromarray(rgb).save(save_path)
+                self.save_queue.task_done()
+            except Exception:
+                continue
+
+    def load_configuration(self):
+        config = configparser.ConfigParser()
+        config_path = 'set.ini'
+        if not os.path.exists(config_path):
+            config['Settings'] = {
+                'model_path': './models/yolo11x.pt',
+                'nms_iou_threshold': str(NMS_IOU_THRESHOLD_DEFAULT),
+                'inference_size': '640',
+                'batch_size': '8',
+                'roi_iou_threshold': '0.2',
+                'movement_iou_threshold': '0.6',
+                'movement_relative_threshold': '0.02',
+                'movement_consecutive_frames': '5',
+                'movement_stable_seconds': '5'
+            }
+            try:
+                with open(config_path, 'w', encoding='utf-8') as f:
+                    config.write(f)
+                self.log_message(f"已创建默认配置文件 {config_path}")
+            except Exception as e:
+                Messagebox.showerror("错误", f"无法创建配置文件: {e}")
+                return False
+        else:
+            config.read(config_path, encoding='utf-8')
+
+        self.MODEL_PATH = config.get('Settings', 'model_path', fallback='./models/yolo11x.pt')
+
         try:
-            results = model(frames, verbose=False)
+            self.NMS_IOU_THRESHOLD = float(config.get('Settings', 'nms_iou_threshold', fallback=str(NMS_IOU_THRESHOLD_DEFAULT)))
+            self.NMS_IOU_THRESHOLD = max(0.0, min(1.0, self.NMS_IOU_THRESHOLD))
+        except ValueError:
+            self.NMS_IOU_THRESHOLD = NMS_IOU_THRESHOLD_DEFAULT
 
-            for i, result in enumerate(results):
-                boxes = result.boxes
-                current_time = current_times[i]
-                original_frame = original_frames[i]
+        try:
+            self.INFERENCE_SIZE = int(config.get('Settings', 'inference_size', fallback='640'))
+            self.INFERENCE_SIZE = max(320, min(1280, self.INFERENCE_SIZE))
+        except ValueError:
+            self.INFERENCE_SIZE = 640
 
-                for box in boxes:
-                    cls_id = int(box.cls[0])
-                    conf = float(box.conf[0])
-                    if cls_id not in target_classes or conf < confidence_threshold:
-                        continue
+        try:
+            self.BATCH_SIZE = int(config.get('Settings', 'batch_size', fallback='8'))
+            self.BATCH_SIZE = max(1, self.BATCH_SIZE)
+        except ValueError:
+            self.BATCH_SIZE = 8
 
-                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
-                    current_box = (x1, y1, x2, y2)
+        try:
+            self.ROI_IOU_THRESHOLD = float(config.get('Settings', 'roi_iou_threshold', fallback='0.2'))
+        except ValueError:
+            self.ROI_IOU_THRESHOLD = 0.2
 
-                    # ROI 检查
-                    in_roi = True
-                    if self.roi_points:
-                        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-                        try:
-                            in_roi = point_in_polygon(cx, cy, self.roi_points)
-                        except Exception as e:
-                            logging.warning(f"ROI 检测失败: {e}")
-                            in_roi = False
-                    if not in_roi:
-                        continue
+        try:
+            self.MOVEMENT_IOU_THRESHOLD = float(config.get('Settings', 'movement_iou_threshold', fallback='0.6'))
+        except ValueError:
+            self.MOVEMENT_IOU_THRESHOLD = 0.6
 
-                    # 移动性检查
-                    obj_key = f"{cls_id}_{x1}_{y1}_{x2}_{y2}"
-                    if only_movement_targets:
-                        if not self.is_target_moving_enhanced(obj_key, current_box, current_time):
-                            continue
+        try:
+            self.MOVEMENT_RELATIVE_THRESHOLD = float(config.get('Settings', 'movement_relative_threshold', fallback='0.02'))
+        except ValueError:
+            self.MOVEMENT_RELATIVE_THRESHOLD = 0.02
 
-                    # === 核心：IoU 去重 + 首次进入 ROI ===
-                    should_capture = True
-                    with self.roi_lock:
-                        # 检查是否与已记录的 ROI 内目标高度重合
-                        for recorded_box, recorded_cls, _ in self.roi_entered_boxes:
-                            if recorded_cls == cls_id and calculate_iou(current_box, recorded_box) > roi_iou_threshold:
-                                should_capture = False
-                                break
+        try:
+            self.MOVEMENT_CONSECUTIVE_FRAMES = int(config.get('Settings', 'movement_consecutive_frames', fallback='5'))
+        except ValueError:
+            self.MOVEMENT_CONSECUTIVE_FRAMES = 5
 
-                        if should_capture:
-                            # 记录该目标（即使后续移动，也视为已进入）
-                            self.roi_entered_boxes.append((current_box, cls_id, current_time))
+        try:
+            self.MOVEMENT_STABLE_SECONDS = float(config.get('Settings', 'movement_stable_seconds', fallback='5'))
+        except ValueError:
+            self.MOVEMENT_STABLE_SECONDS = 5
 
-                    if should_capture:
-                        object_type = class_mapping[cls_id]
-                        frame_number = int(current_time * fps)
-                        cls_en = coco_classes_en[cls_id] if cls_id < len(coco_classes_en) else "unknown"
-                        box_info = [(x1, y1, x2, y2, cls_en, conf)]
+        self.log_message(
+            f"配置加载成功: NMS IoU={self.NMS_IOU_THRESHOLD}, "
+            f"推理分辨率={self.INFERENCE_SIZE}, batch_size={self.BATCH_SIZE}, "
+            f"ROI IoU={self.ROI_IOU_THRESHOLD}"
+        )
+        return True
 
-                        count_for_cls = len([b for b, c, t in self.roi_entered_boxes if c == cls_id])
-                        if save_detection_screenshot(
-                            original_frame, save_path, video_filename, frame_number,
-                            object_type, count_for_cls + 1, conf,
-                            boxes_info=box_info, annotate=annotate_on_screenshot
-                        ):
-                            detection_info.append(f"{object_type} 在 {current_time:.2f} 秒首次进入ROI，置信度: {conf:.2f}")
+    def load_model(self):
+        if not ULTRALYTICS_AVAILABLE:
+            Messagebox.showerror("错误", "Ultralytics 未安装！")
+            return False
 
-            return results
+        try:
+            if not os.path.exists(self.MODEL_PATH):
+                raise FileNotFoundError(f"模型文件不存在: {self.MODEL_PATH}")
+
+            self.model = YOLO(self.MODEL_PATH)
+            self.log_message("Ultralytics YOLO 模型加载成功！")
+            return True
         except Exception as e:
-            show_error(f"模型推理出错: {e}")
-            return None
+            self.log_message(f"加载模型失败: {str(e)}")
+            Messagebox.showerror("错误", f"模型加载失败:\n{str(e)}\n请确保模型由 Ultralytics 生成。")
+            return False
 
-    def is_target_moving_enhanced(self, object_key, current_box, current_time):
-        prev_box = self.prev_positions.get(object_key)
+    def _auto_adjust_batch_size(self):
+        if not torch.cuda.is_available():
+            self.log_message("未检测到 CUDA，使用 CPU 推理，batch_size 强制设为 1")
+            self.BATCH_SIZE = 1
+            return
+
+        try:
+            total_vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        except Exception as e:
+            self.log_message(f"获取 GPU 显存失败: {e}，默认设 batch_size=1")
+            self.BATCH_SIZE = 1
+            return
+
+        model_name = os.path.basename(self.MODEL_PATH).lower()
+        if 'yolo11n' in model_name:
+            base_vram = 0.9
+            model_type = "YOLO11n"
+        elif 'yolo11s' in model_name:
+            base_vram = 1.3
+            model_type = "YOLO11s"
+        elif 'yolo11m' in model_name:
+            base_vram = 1.9
+            model_type = "YOLO11m"
+        elif 'yolo11l' in model_name:
+            base_vram = 2.3
+            model_type = "YOLO11l"
+        elif 'yolo11x' in model_name:
+            base_vram = 2.9
+            model_type = "YOLO11x"
+        else:
+            base_vram = 2.9
+            model_type = "Unknown"
+
+        safe_vram_limit = total_vram_gb * 0.85
+        if safe_vram_limit <= base_vram:
+            max_batch = 1
+        else:
+            max_batch = 1 + int((safe_vram_limit - base_vram) / 0.03)
+            max_batch = max(1, max_batch)
+
+        original_batch = self.BATCH_SIZE
+        self.BATCH_SIZE = min(original_batch, max_batch)
+
+        self.log_message(
+            f"GPU 显存: {total_vram_gb:.1f} GB | 模型: {model_type} | "
+            f"inference_size: {self.INFERENCE_SIZE} → "
+            f"自动设置 batch_size = {self.BATCH_SIZE} (用户配置: {original_batch})"
+        )
+
+    def setup_ui(self):
+        # 主框架
+        main_frame = ttk.Frame(self.root, padding=10)
+        main_frame.pack(fill=BOTH, expand=True)
+
+        # 左侧选项设置框架
+        left_frame = ttk.Labelframe(main_frame, text="选项设置", padding=10)
+        left_frame.pack(side=LEFT, fill=Y, padx=(0, 10))
+
+        # 视频文件选择
+        self.video_entry = self._create_labeled_entry(left_frame, "选择视频文件:", "浏览", self.select_video)
+        # 保存路径选择
+        self.save_path_entry = self._create_labeled_entry(left_frame, "截图保存路径:", "浏览", self.select_save_path)
+
+        # 目标类别选择框架（使用滚动框架）
+        classes_frame = ttk.Labelframe(left_frame, text="选择目标类别", padding=10)
+        classes_frame.pack(fill=BOTH, expand=True, pady=(0, 10))
+        # 全选/取消按钮框架
+        button_frame = ttk.Frame(classes_frame)
+        button_frame.pack(pady=(0, 5), anchor=W)
+        ttk.Button(button_frame, text="全选", command=self.select_all_classes).pack(side=LEFT, padx=(0, 5))
+        ttk.Button(button_frame, text="取消已选", command=self.deselect_all_classes).pack(side=LEFT)
+        # 滚动画布
+        scrollable_frame = ScrolledFrame(classes_frame, height=180)
+        scrollable_frame.pack(side=LEFT, fill=BOTH, expand=True)
+        # 类别复选框容器
+        checkbox_container = ttk.Frame(scrollable_frame)
+        checkbox_container.pack(fill=BOTH, expand=True)
+
+        # 初始化类别复选框
+        self.class_vars = []
+        default_selected = {'bicycle', 'car', 'motorcycle', 'bus', 'truck'}
+        for i, (idx, name) in enumerate(self.class_names.items()):
+            row, col = divmod(i, 6)
+            var = IntVar(value=1 if name in default_selected else 0)
+            display = COCO_CLASS_MAPPING.get(name, name)
+            cb = ttk.Checkbutton(checkbox_container, text=display, variable=var)
+            cb.grid(row=row, column=col, sticky=W, padx=2, pady=1)
+            self.class_vars.append(var)
+
+        # 处理选项框架
+        options_frame = ttk.Labelframe(left_frame, text="处理选项", padding=10)
+        options_frame.pack(fill=X, pady=(0, 10))
+
+        # 跳帧数设置
+        ttk.Label(options_frame, text="跳帧数:", width=18).grid(row=0, column=0, sticky=W)
+        self.speed_entry = ttk.Entry(options_frame)
+        self.speed_entry.insert(0, "23")
+        self.speed_entry.grid(row=0, column=1, sticky=EW, padx=5)
+        ttk.Label(options_frame, text="(1=逐帧, 值越大越快)", foreground="gray").grid(row=0, column=2)
+
+        # 置信度阈值设置
+        ttk.Label(options_frame, text="置信度阈值:", width=18).grid(row=1, column=0, sticky=W)
+        self.confidence_entry = ttk.Entry(options_frame)
+        self.confidence_entry.insert(0, "0.1")
+        self.confidence_entry.grid(row=1, column=1, sticky=EW, padx=5)
+        ttk.Label(options_frame, text="(0.0-1.0)", foreground="gray").grid(row=1, column=2)
+
+        # 只对移动目标截图
+        self.only_moving_var = IntVar(value=1)
+        ttk.Checkbutton(options_frame, text="只对移动目标截图", variable=self.only_moving_var).grid(row=2, column=0, sticky=W, padx=(0, 20))
+        # 在截图中标注目标
+        self.annotate_var = IntVar(value=0)
+        ttk.Checkbutton(options_frame, text="在截图中标注目标", variable=self.annotate_var).grid(row=2, column=1, sticky=W)
+
+        # ROI选择框架
+        roi_frame = ttk.Frame(options_frame)
+        roi_frame.grid(row=4, column=0, sticky=EW, pady=5, padx=(0, 10))  # 同一行row=4，第0列，右侧留间距
+        self.roi_button = ttk.Button(roi_frame, text="选取关注区域", command=self.select_roi, bootstyle=INFO)
+        self.roi_button.pack(side=LEFT)
+        self.roi_label = ttk.Label(roi_frame, text="未选取关注区域", foreground="gray")
+        self.roi_label.pack(side=LEFT, padx=5)
+
+        # 预览框架（同一行号，分配第1列，取消跨列）
+        preview_frame = ttk.Frame(options_frame)
+        preview_frame.grid(row=4, column=1, sticky=EW, pady=5)  # 同一行row=4，第1列
+        self.preview_button = ttk.Button(preview_frame, text="开启实时预览", command=self.toggle_preview, bootstyle=INFO)
+        self.preview_button.pack(side=LEFT)
+        self.preview_status = ttk.Label(preview_frame, text="预览: 关闭", foreground="gray")
+        self.preview_status.pack(side=LEFT, padx=5)
+        # 控制按钮框架
+        control_button_frame = ttk.Frame(left_frame)
+        control_button_frame.pack(pady=2)
+        self.start_button = ttk.Button(control_button_frame, text="开始处理", command=self.start_processing)
+        self.start_button.pack(side=LEFT, padx=5)
+        self.pause_button = ttk.Button(control_button_frame, text="暂停处理", command=self.pause_processing, state=DISABLED, bootstyle=WARNING)
+        self.pause_button.pack(side=LEFT, padx=5)
+        self.stop_button = ttk.Button(control_button_frame, text="停止处理", command=self.stop_processing, state=DISABLED, bootstyle=DANGER)
+        self.stop_button.pack(side=LEFT, padx=5)
+
+        # 实时统计框架
+        stats_frame = ttk.Labelframe(left_frame, text="实时统计", padding=10)
+        stats_frame.pack(fill=X, pady=(10, 0))
+        self.fps_label = ttk.Label(stats_frame, text="FPS(每秒处理帧数): 0.0")
+        self.fps_label.pack(anchor=W)
+        self.targets_label = ttk.Label(stats_frame, text="目标截图总数: 0")
+        self.targets_label.pack(anchor=W)
+        self.gpu_label = ttk.Label(stats_frame, text="占用 GPU 显存: N/A")
+        self.gpu_label.pack(anchor=W)
+
+        # 右侧处理状态框架
+        right_frame = ttk.Labelframe(main_frame, text="处理状态", padding=10)
+        right_frame.pack(side=RIGHT, fill=BOTH, expand=True)
+
+        # 状态标签
+        self.status_label = ttk.Label(right_frame, text="等待开始......")
+        self.status_label.pack(fill=X, pady=10)
+
+        # 进度条
+        self.progress_var = tk.DoubleVar()
+        ttk.Progressbar(right_frame, variable=self.progress_var).pack(fill=X, pady=5)
+
+        # 日志框架 
+        log_frame = ttk.Labelframe(right_frame, text="处理日志", padding=10)
+        log_frame.pack(fill=X, pady=(10, 5)) 
+        # 1. 创建滚动条
+        log_scrollbar = ttk.Scrollbar(log_frame, orient=VERTICAL)
+        log_scrollbar.pack(side=RIGHT, fill=Y)
+
+        # 2. 创建原生Text组件（支持state属性）
+        self.log_text = tk.Text(log_frame,wrap=WORD,state=tk.DISABLED,height=8,yscrollcommand=log_scrollbar.set )
+        self.log_text.pack(fill=BOTH, expand=True)
+
+        # 3. 绑定滚动条与文本框
+        log_scrollbar.config(command=self.log_text.yview)
+
+        #预览框架
+        preview_frame = ttk.Labelframe(right_frame, text="实时预览", padding=5)
+        # 填充水平空间，垂直按需扩展，占据日志框下方区域
+        preview_frame.pack(fill=BOTH, expand=True, pady=(5, 0))
+        # 预览标签（用于显示视频帧），设置居中对齐
+        self._preview_label = ttk.Label(preview_frame, anchor="center")
+        self._preview_label.pack(fill=BOTH, expand=True)  # 填充预览框架空间
+
+
+        self._ui_ready = True
+        for msg in self._log_buffer:
+            self.root.after_idle(lambda m=msg: self._safe_log(m))
+        self._log_buffer.clear()
+
+    def _create_labeled_entry(self, parent, label_text, button_text, command):
+        frame = ttk.Frame(parent)
+        ttk.Label(frame, text=label_text).pack(side=LEFT)
+        entry = ttk.Entry(frame, width=50)
+        entry.pack(side=LEFT, padx=5)
+        ttk.Button(frame, text=button_text, command=command, bootstyle=PRIMARY).pack(side=LEFT)
+        frame.pack(pady=2)
+        return entry
+
+    def log_message(self, message: str):
+        # 1. 输出到控制台
+        print(f"[LOG] {message}")
+        
+        # 2. 写入运行时日志文件
+        try:
+            with open(self.log_file_path, "a", encoding="utf-8") as f:
+                f.write(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}\n")
+        except Exception as e:
+            print(f"[WARN] 写入日志文件失败: {e}")
+        
+        # 3. 输出到UI文本框
+        if self._ui_ready:
+            self.root.after(0, lambda msg=message: self._safe_log(msg))
+        else:
+            # 缓冲区仅作为兜底，同时打印缓冲区状态
+            self._log_buffer.append(message)
+            print(f"[BUFFER] UI未就绪，日志存入缓冲区，当前缓冲区长度: {len(self._log_buffer)}")
+
+    def _safe_log(self, message: str):
+        try:
+            # 强制切换为可编辑状态
+            if self.log_text["state"] != NORMAL:
+                self.log_text.config(state=NORMAL)
+            # 插入日志，添加时间戳
+            timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+            self.log_text.insert(END, f"[{timestamp}] {message}\n")
+            # 强制滚动到最新日志，避免日志被隐藏
+            self.log_text.see(END)
+            # 恢复为不可编辑状态
+            self.log_text.config(state=DISABLED)
+            # 刷新UI，确保日志立即显示
+            self.log_text.update_idletasks()
+        except Exception as e:
+            # 若UI日志写入失败，输出到控制台和文件
+            print(f"[WARN] UI日志写入失败: {e}，消息内容: {message}")
+            # 写入日志文件备份
+            try:
+                with open(self.log_file_path, "a", encoding="utf-8") as f:
+                    f.write(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [UI日志失败] {message}\n")
+            except:
+                pass
+
+    def update_status(self, text: str):
+        self.root.after_idle(lambda: self.status_label.config(text=text))
+
+    def select_video(self):
+        paths = filedialog.askopenfilenames()
+        if paths:
+            self.file_paths = list(paths)
+            if len(paths) > 3:
+                display_paths = ", ".join(paths[:2]) + f", ... (+{len(paths)-2} 个文件)"
+            else:
+                display_paths = ", ".join(paths)
+            self.video_entry.delete(0, END)
+            self.video_entry.insert(0, display_paths)
+            self.log_message(f"已选择 {len(self.file_paths)} 个视频文件")
+
+    def select_save_path(self):
+        folder = filedialog.askdirectory()
+        if folder:
+            self.save_folder = folder
+            self.save_path_entry.delete(0, END)
+            self.save_path_entry.insert(0, self.save_folder)
+            try:
+                test = os.path.join(folder, "测试写入权限.tmp")
+                open(test, 'w').close()
+                os.remove(test)
+                self.log_message("路径验证: 具有写入权限，支持中文路径")
+            except Exception as e:
+                Messagebox.showwarning("权限警告", f"保存路径可能有问题: {e}")
+
+    #ROI---------------------------           
+    #ROI 选择
+    def select_roi(self):
+        if not self.file_paths:
+            self.log_message("错误: 请先选择视频文件")
+            return
+
+        cap = cv2.VideoCapture(self.file_paths[0])
+        ret, frame = cap.read()
+        cap.release()
+        if not ret:
+            self.log_message("错误: 无法读取视频首帧")
+            return
+
+        self._roi_frame_orig = frame.copy()
+        self._roi_orig_h, self._roi_orig_w = frame.shape[:2]
+
+        # 初始化缩放后的图像（先按原始比例缩放到合适大小）
+        self._resize_roi_display(800, 600)  # 初始窗口大小
+
+        # 创建窗口
+        self._roi_window = ttk.Toplevel(title="选择关注区域 (ROI)")
+        self._roi_window.geometry("820x720")  # 宽+20, 高+120（含控件）
+        self._roi_window.transient(self.root)
+        self._roi_window.grab_set()
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.ico")
+        if os.path.exists(icon_path):
+            try:
+                self._roi_window.iconbitmap(icon_path)
+            except Exception as e:
+                self.log_message(f"[WARN] ROI窗口图标加载失败: {e}")
+        # Canvas 布局：可伸缩
+        self._roi_canvas = ttk.Canvas(self._roi_window, bg="black")
+        self._roi_canvas.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+        self._roi_window.grid_rowconfigure(0, weight=1)
+        self._roi_window.grid_columnconfigure(0, weight=1)
+
+        # 显示初始图像
+        self._roi_photo = ImageTk.PhotoImage(Image.fromarray(self._roi_display_rgb))
+        self._canvas_img_id = self._roi_canvas.create_image(0, 0, anchor=NW, image=self._roi_photo)
+
+        # 初始化 ROI 点
+        self._roi_points_scaled = []
+
+        # 绑定事件
+        self._roi_canvas.bind("<Button-1>", self._on_roi_click)
+        self._roi_canvas.bind("<Button-3>", self._on_roi_right_click)
+        self._roi_window.bind("<Configure>", self._on_roi_window_resize)
+
+        # 按钮区域
+        btn_frame = ttk.Frame(self._roi_window)
+        btn_frame.grid(row=1, column=0, pady=5)
+        ttk.Label(self._roi_window, text="左键添加点，右键删除最后一点", foreground="gray").grid(row=2, column=0)
+        
+        ttk.Button(btn_frame, text="完成", bootstyle=SUCCESS, command=self._finish_roi_selection).pack(side=LEFT, padx=5)
+        ttk.Button(btn_frame, text="重置", bootstyle=WARNING, command=self._reset_roi_points).pack(side=LEFT, padx=5)
+        ttk.Button(btn_frame, text="取消", bootstyle=SECONDARY, command=self._roi_window.destroy).pack(side=LEFT, padx=5)
+
+        self.log_message("请在弹出窗口中绘制关注区域（至少3个点）")
+
+
+    #ROI选择窗口核心缩放逻辑
+    def _resize_roi_display(self, canvas_w, canvas_h):
+        """根据 Canvas 尺寸，等比缩放原始帧"""
+        if not hasattr(self, '_roi_frame_orig'):
+            return
+
+        frame = self._roi_frame_orig
+        h, w = self._roi_orig_h, self._roi_orig_w
+
+        # 计算缩放比例（保持宽高比）
+        scale_w = canvas_w / w
+        scale_h = canvas_h / h
+        scale = min(scale_w, scale_h)
+
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+
+        # 缩放图像
+        resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        self._roi_display_rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        self._roi_current_scale = scale  # 用于坐标映射
+        self._roi_canvas_w = new_w
+        self._roi_canvas_h = new_h
+        self._roi_canvas_offset_x = (canvas_w - new_w) // 2
+        self._roi_canvas_offset_y = (canvas_h - new_h) // 2
+
+    #窗口调整事件处理
+    def _on_roi_window_resize(self, event):
+        # 忽略按钮区域 resize（只响应 Canvas 区域变化）
+        if event.widget != self._roi_window:
+            return
+        # 延迟处理，避免频繁触发
+        if hasattr(self, '_roi_resize_after_id'):
+            self._roi_window.after_cancel(self._roi_resize_after_id)
+        self._roi_resize_after_id = self._roi_window.after(100, self._perform_roi_resize, event.width, event.height - 100)  # 扣除按钮高度
+
+    def _perform_roi_resize(self, win_w, win_h):
+        if win_w <= 1 or win_h <= 1:
+            return
+        # 重新缩放图像
+        self._resize_roi_display(win_w, win_h)
+        # 更新 Canvas 显示
+        self._roi_photo = ImageTk.PhotoImage(Image.fromarray(self._roi_display_rgb))
+        self._roi_canvas.itemconfig(self._canvas_img_id, image=self._roi_photo)
+        self._roi_canvas.config(width=win_w, height=win_h)
+        # 移动图像到居中位置
+        self._roi_canvas.coords(self._canvas_img_id, self._roi_canvas_offset_x, self._roi_canvas_offset_y)
+        # 重绘 ROI 点（需重新计算位置）
+        self._redraw_roi()
+
+    #辅助方法：鼠标交互
+    def cancel_roi(self):
+        self.roi = None
+        self.roi_label.config(text="关注区域未设置", foreground="gray")
+        self.roi_button.config(text="选取关注区域", command=self.select_roi)
+        self.log_message("已取消关注区域")
+
+    def _on_roi_click(self, event):
+        offset_x = getattr(self, '_roi_canvas_offset_x', 0)
+        offset_y = getattr(self, '_roi_canvas_offset_y', 0)
+        # 转换为图像坐标系（扣除居中偏移）
+        img_x = event.x - offset_x
+        img_y = event.y - offset_y
+        # 检查是否在图像范围内
+        if 0 <= img_x < self._roi_canvas_w and 0 <= img_y < self._roi_canvas_h:
+            self._roi_points_scaled.append((img_x, img_y))
+            self._redraw_roi()
+
+    def _on_roi_right_click(self, event):
+        if self._roi_points_scaled:
+            self._roi_points_scaled.pop()
+            self._redraw_roi()
+
+    def _redraw_roi(self):
+        self._roi_canvas.delete("roi_line", "roi_point")
+        if not hasattr(self, '_roi_points_scaled') or not self._roi_points_scaled:
+            return
+
+        offset_x = getattr(self, '_roi_canvas_offset_x', 0)
+        offset_y = getattr(self, '_roi_canvas_offset_y', 0)
+
+        # 重绘点
+        for x, y in self._roi_points_scaled:
+            self._roi_canvas.create_oval(
+                x + offset_x - 3, y + offset_y - 3,
+                x + offset_x + 3, y + offset_y + 3,
+                fill="red", tags="roi_point"
+            )
+
+        # 重绘连线
+        n = len(self._roi_points_scaled)
+        if n > 1:
+            for i in range(n - 1):
+                x1, y1 = self._roi_points_scaled[i]
+                x2, y2 = self._roi_points_scaled[i + 1]
+                self._roi_canvas.create_line(
+                    x1 + offset_x, y1 + offset_y,
+                    x2 + offset_x, y2 + offset_y,
+                    fill="lime", width=2, tags="roi_line"
+                )
+        if n >= 3:
+            x1, y1 = self._roi_points_scaled[-1]
+            x2, y2 = self._roi_points_scaled[0]
+            self._roi_canvas.create_line(
+                x1 + offset_x, y1 + offset_y,
+                x2 + offset_x, y2 + offset_y,
+                fill="lime", width=2, dash=(4, 2), tags="roi_line"
+            )
+
+    #完成 ROI 选择
+    def _finish_roi_selection(self):
+        if len(self._roi_points_scaled) < 3:
+            Messagebox.showwarning("ROI 无效", "请至少选择 3 个点")
+            return
+
+        # 从显示坐标 → 原始视频坐标
+        roi_points_orig = []
+        scale = self._roi_current_scale
+        for x_scaled, y_scaled in self._roi_points_scaled:
+            x_orig = int(round(x_scaled / scale))
+            y_orig = int(round(y_scaled / scale))
+            roi_points_orig.append((x_orig, y_orig))
+
+        # ===== 合法性校验 =====
+        h, w = self._roi_orig_h, self._roi_orig_w
+        roi_array = np.array(roi_points_orig, dtype=np.int32)
+
+        if roi_array.ndim != 2 or roi_array.shape[1] != 2:
+            self.log_message("ROI 格式错误")
+            return
+
+        xs, ys = roi_array[:, 0], roi_array[:, 1]
+        if not (np.all(xs >= 0) and np.all(xs < w) and np.all(ys >= 0) and np.all(ys < h)):
+            self.log_message(f"ROI 点超出视频帧范围（宽{w}, 高{h}）")
+            return
+
+        area = cv2.contourArea(roi_array)
+        if area <= 1.0:
+            self.log_message("ROI 区域无效：面积过小或退化")
+            return
+
+        # 保存
+        self.roi = roi_array.copy()
+        self.roi_label.config(text="关注区域已设置", foreground="orange")
+        self.roi_button.config(text="取消选取", command=self.cancel_roi)
+        self.log_message(f"成功设置 ROI，面积: {area:.1f} 像素")
+
+        self._roi_window.destroy()
+
+    #重置 & 取消ROI    
+    def _reset_roi_points(self):
+        self._roi_points_scaled.clear()
+        self._redraw_roi()
+
+    def cancel_roi(self):
+        self.roi = None
+        self.roi_label.config(text="关注区域未设置", foreground="gray")
+        self.roi_button.config(text="选取关注区域", command=self.select_roi)
+        self.log_message("已取消关注区域")
+
+    #ROI-------------
+
+    # 同步预览实现 
+    def toggle_preview(self):
+        """切换同步预览（支持多文件连续预览）"""
+        if not self.file_paths:
+            self.log_message("请先选择视频文件")
+            return
+            
+        if self._preview_active:
+            # 关闭预览：清空预览标签，终止更新循环
+            self._preview_label.config(image="", text="预览已关闭")
+            self._preview_active = False
+            self.preview_button.config(text="开启实时预览")
+            self.preview_status.config(text="预览: 关闭", foreground="gray")
+            self.log_message("实时预览已关闭")
+        else:
+            # 开启预览：启动更新循环，无需等待单个文件开始
+            self._preview_active = True
+            self.preview_button.config(text="关闭实时预览")
+            self.preview_status.config(text="预览: 开启", foreground="orange")
+            self.log_message("实时预览已开启，将跟随多文件处理连续同步显示")
+            # 立即启动预览更新循环
+            self._update_preview_display()
+
+    def _start_preview(self):
+        """启动同步预览"""
+        self._preview_active = True
+        
+        self._preview_window = ttk.Toplevel(self.root)
+        self._preview_window.title("实时预览")
+        self._preview_window.geometry("800x600")
+        self._preview_window.protocol("WM_DELETE_WINDOW", self._close_preview)
+        
+        self._preview_label = ttk.Label(self._preview_window)
+        self._preview_label.pack(fill=BOTH, expand=True)
+        
+        self.preview_button.config(text="关闭实时预览")
+        self.preview_status.config(text="预览: 开启", foreground="orange")
+        
+        self._update_preview_display()
+
+    def _update_preview_display(self):
+        if not self._preview_active:
+            return
+        try:
+            item = self._preview_queue.get_nowait()
+            if not isinstance(item, (tuple, list)) or len(item) != 3:
+                self.log_message(f"[WARN] 预览队列收到非法数据: {item}")
+                return
+            frame, frame_idx, annotate_info = item
+            if frame is None:
+                # 无帧提示
+                self._preview_label.config(text="等待视频帧...", image="")
+                self._current_preview_photo = None
+                return
+
+            # 绘制ROI
+            if self.roi is not None:
+                cv2.polylines(frame, [self.roi], isClosed=True, color=(0, 255, 0), thickness=2)
+
+            # 绘制标注
+            for (x1, y1, x2, y2, class_display, score) in annotate_info:
+                color = COLORS[hash(class_display) % len(COLORS)]
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                text = f"{class_display} {score:.2f}"
+                text_size, _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                text_x = x1
+                text_y = y1 - 10 if y1 - 10 > 0 else y1 + text_size[1] + 10
+                cv2.rectangle(
+                    frame,
+                    (text_x, text_y - text_size[1] - 2),
+                    (text_x + text_size[0] + 2, text_y + 2),
+                    color,
+                    -1
+                )
+                cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+            # 转换并显示
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            pil_image = Image.fromarray(rgb_frame)
+            preview_width = self._preview_label.winfo_width() or 600
+            preview_height = self._preview_label.winfo_height() or 400
+            pil_image.thumbnail((preview_width, preview_height), Image.LANCZOS)
+            self._current_preview_photo = ImageTk.PhotoImage(pil_image)
+            self._preview_label.config(image=self._current_preview_photo, text="")
+            self._preview_label.image = self._current_preview_photo
+
+        except queue.Empty:
+            pass
+
+        if self._preview_active:
+            self.root.after(30, self._update_preview_display)  # 稍微降低频率
+
+    def _close_preview(self):
+        """关闭预览（嵌入模式，仅清空标签）"""
+        self._preview_active = False
+        
+        # 清空预览标签
+        self._preview_label.config(image="")
+        # 清空预览队列
+        while not self._preview_queue.empty():
+            try:
+                self._preview_queue.get_nowait()
+            except:
+                break
+        
+        # 更新按钮和状态
+        self.preview_button.config(text="开启实时预览")
+        self.preview_status.config(text="预览: 关闭", foreground="gray")
+
+    def save_image_safely(self, image, save_path):
+        try:
+            self.save_queue.put_nowait((image, save_path))
+            return f"截图: {save_path}"
+        except queue.Full:
+            return f"截图队列已满，跳过: {save_path}"
+
+    #  ROI 检查
+    def _is_point_in_roi(self, x, y):
+        if self.roi is None:
+            return True
+        try:
+            # 确保 ROI 是有效 np.int32 (N, 2)
+            if not isinstance(self.roi, np.ndarray) or self.roi.shape[1] != 2:
+                return True  # 退化为无 ROI
+            pt = (int(round(x)), int(round(y)))
+            result = cv2.pointPolygonTest(self.roi, pt, measureDist=False)
+            return result >= 0
+        except Exception as e:
+            self.log_message(f"[ROI 安全防护] 检查点 ({x:.1f},{y:.1f}) 时出错: {e}")
+            return True  # 安全默认：放行
+
+    # 核心：轻量移动检测 
+    def _box_iou_simple(self, box1, box2):
+        x1, y1, x2, y2 = box1
+        x1_p, y1_p, x2_p, y2_p = box2
+        inter_x1 = max(x1, x1_p)
+        inter_y1 = max(y1, y1_p)
+        inter_x2 = min(x2, x2_p)
+        inter_y2 = min(y2, y2_p)
+        if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
+            return 0.0
+        inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+        area1 = (x2 - x1) * (y2 - y1)
+        area2 = (x2_p - x1_p) * (y2_p - y1_p)
+        union_area = area1 + area2 - inter_area
+        return inter_area / union_area
+
+    def _is_target_moving_enhanced(self, object_key, current_box, current_time, prev_positions, stable_since, movement_buffer):
+        prev_box = prev_positions.get(object_key)
         if prev_box is None:
             return True
 
-        iou = calculate_iou(prev_box, current_box)
-        if iou > movement_iou_threshold:
-            if object_key not in self.stable_since:
-                self.stable_since[object_key] = current_time
+        iou = self._box_iou_simple(prev_box, current_box)
+        if iou > self.MOVEMENT_IOU_THRESHOLD:
+            if object_key not in stable_since:
+                stable_since[object_key] = current_time
             return False
 
         x1, y1, x2, y2 = current_box
@@ -233,709 +941,554 @@ class VideoProcessingCore:
 
         dx = abs((x1 + x2) / 2 - (x1_p + x2_p) / 2)
         dy = abs((y1 + y2) / 2 - (y1_p + y2_p) / 2)
-
         rel_dx = dx / w_avg
         rel_dy = dy / h_avg
 
-        moved = rel_dx > movement_relative_threshold or rel_dy > movement_relative_threshold
+        moved = rel_dx > self.MOVEMENT_RELATIVE_THRESHOLD or rel_dy > self.MOVEMENT_RELATIVE_THRESHOLD
 
-        if object_key not in self.movement_buffer:
-            self.movement_buffer[object_key] = 0
+        if object_key not in movement_buffer:
+            movement_buffer[object_key] = 0
 
         if moved:
-            self.movement_buffer[object_key] += 1
+            movement_buffer[object_key] += 1
         else:
-            self.movement_buffer[object_key] = 0
+            movement_buffer[object_key] = 0
 
-        last_stable = self.stable_since.get(object_key, -10)
-        recently_stable = (current_time - last_stable) < movement_stable_seconds
-        if recently_stable and self.movement_buffer[object_key] >= movement_consecutive_frames:
-            del self.stable_since[object_key]
+        last_stable = stable_since.get(object_key, -10)
+        recently_stable = (current_time - last_stable) < self.MOVEMENT_STABLE_SECONDS
+        if recently_stable and movement_buffer[object_key] >= self.MOVEMENT_CONSECUTIVE_FRAMES:
+            del stable_since[object_key]
             return True
         elif not recently_stable:
-            return self.movement_buffer[object_key] >= movement_consecutive_frames
-
+            return movement_buffer[object_key] >= self.MOVEMENT_CONSECUTIVE_FRAMES
         return False
 
-    def read_frames(self, video_path, speed_multiplier):
-        logging.info(f"开始读取视频: {video_path}")
-        with VideoCaptureContextManager(video_path) as cap:
-            if not cap.isOpened():
-                show_error("无法打开视频文件")
-                return
-            try:
-                while True:
-                    # 检查是否需要停止或暂停（无锁快检）
-                    with self.pause_stop_lock:
-                        if self.stopped:
-                            break
-                        should_wait = self.paused
+    # ==============================
+    def read_frames_producer(self, video_path, skip_frames):
+        cap = cv2.VideoCapture(video_path)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        frame_idx = 0
 
-                    if should_wait:
-                        self.resume_event.wait()  # 阻塞直到 resume_event.set()
-                        continue  # 回到循环开头重新检查 stopped
+        with self.progress_lock:
+            self.total_frames = total_frames
 
-                    frames = []
-                    original_frames = []
-                    current_times = []
+        while cap.isOpened() and not self.stopped:
+            while self.paused:
+                time.sleep(0.01)
+                if self.stopped:
+                    break
+            if self.stopped:
+                break
 
-                    for _ in range(BATCH_SIZE):
-                        for _ in range(int(speed_multiplier)):
-                            if not cap.grab():
-                                break
-                        ret, frame = cap.retrieve()
-                        if not ret:
-                            break
-                        current_frame_idx = cap.get(cv2.CAP_PROP_POS_FRAMES)
-                        current_time = current_frame_idx / cap.get(cv2.CAP_PROP_FPS)
-                        frames.append(frame)
-                        original_frames.append(frame)
-                        current_times.append(current_time)
+            ret = cap.grab()
+            if not ret:
+                break
 
-                    if not frames:
-                        break
+            if frame_idx % skip_frames == 0:
+                ret, frame = cap.retrieve()
+                if not ret:
+                    break
 
-                    put_success = False
-                    for _ in range(3):
-                        try:
-                            self.frame_queue.put((frames, original_frames, current_times,
-                                                os.path.basename(video_path), cap.get(cv2.CAP_PROP_FPS)), timeout=0.5)
-                            put_success = True
-                            break
-                        except queue.Full:
-                            time.sleep(0.01)
-                            continue
-                    if not put_success:
-                        logging.debug(f"帧队列持续满，跳过 {len(frames)} 帧")
+                with self.progress_lock:
+                    self.current_frame = frame_idx
 
-                    # 再次检查是否在读帧期间被停止
-                    with self.pause_stop_lock:
-                        if self.stopped:
-                            break
+                resized_frame = cv2.resize(frame, (self.INFERENCE_SIZE, self.INFERENCE_SIZE))
+                try:
+                    self.frame_queue.put((frame.copy(), resized_frame, frame_idx), timeout=1.0)
+                except queue.Full:
+                    time.sleep(0.01)
 
-            except Exception as e:
-                show_error(f"读取帧时出错: {e}")
-            finally:
-                if not self.stopped:
-                    self.frame_queue.put(None)
-        logging.info(f"视频读取结束: {video_path}")
-        
+            frame_idx += 1
 
-    def start_processing(self, video_path, model, target_classes, class_mapping, save_path, speed_multiplier,
-                        only_movement_targets, start_button, roi_button, confidence_threshold, annotate_on_screenshot=False):
-        """
-        启动单个视频的处理流程。
-        """
-        with self.roi_lock:
-            self.roi_entered_boxes.clear()
+        cap.release()
+        self.frame_queue.put(None)
+        # 预览队列放入结束标识
+        if self._preview_active:
+            self._preview_queue.put_nowait((None, -1, []))
 
-        self.video_path_for_progress = video_path
+    #进度更新：带暂停检查
+    def _progress_updater(self, file_idx, total_files):
+        """独立线程：定期更新进度条（带暂停检查）"""
+        last_frame = -1
+        while not self.stopped:
+            # 暂停时跳过进度更新
+            if self.paused_display:
+                time.sleep(0.1)
+                continue
+                
+            with self.progress_lock:
+                current = self.current_frame
+                total = self.total_frames
+                current_file_idx = self._current_file_idx
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            future_read = executor.submit(self.read_frames, video_path, speed_multiplier)
-            future_process = executor.submit(
-                self.process_frames, model, target_classes, class_mapping, save_path,
-                only_movement_targets, confidence_threshold, annotate_on_screenshot
-            )
+            if current_file_idx != file_idx:
+                break
 
-            try:
-                concurrent.futures.wait([future_read, future_process], return_when=concurrent.futures.ALL_COMPLETED)
-            except Exception as e:
-                show_error(f"处理线程出错: {e}")
+            if total > 0 and current != last_frame:
+                progress = min(99, int(100 * current / total))
+                self.root.after(0, lambda p=progress: self.progress_var.set(p))
+                self.root.after(0, lambda f=file_idx+1, t=total_files, p=progress: 
+                    self.status_label.config(text=f"处理文件 {f}/{t} | 进度: {p}%"))
+                last_frame = current
 
+            time.sleep(0.1)
 
-    def process_frames(self, model, target_classes, class_mapping, save_path, only_movement_targets, confidence_threshold, annotate_on_screenshot=False):
-        logging.info("开始处理帧")
-        saved_objects = {}
-        detection_info = []
-        total_duration = None
-        last_processed_time = 0.0
+        if not self.stopped and file_idx == total_files - 1:
+            self.root.after(0, lambda: self.progress_var.set(100))
 
+    def process_videos(self, file_paths: list, save_folder: str, selected_classes: list, skip_frames: int, only_moving: bool,
+                    annotate_objects: bool, confidence_threshold: float):
         try:
-            while True:
-                with self.pause_stop_lock:
+            total_files = len(file_paths)
+            for file_idx, file_path in enumerate(file_paths):
+                if self.stopped:
+                    break
+
+                with self.progress_lock:
+                    self._current_file_idx = file_idx
+                    self.current_frame = 0
+                    self.total_frames = 0
+
+                # 文件切换前清空预览队列，避免残留
+                if self._preview_active:
+                    while not self._preview_queue.empty():
+                        try:
+                            self._preview_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                    self.log_message(f"切换到第 {file_idx+1}/{total_files} 个文件，预览已同步跟随")
+
+                self.roi_entered_boxes = []
+                prev_positions = {}
+                movement_buffer = {}
+                stable_since = {}
+                self.frame_queue = queue.Queue(maxsize=10)
+
+                cap_temp = cv2.VideoCapture(file_path)
+                orig_h = int(cap_temp.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                orig_w = int(cap_temp.get(cv2.CAP_PROP_FRAME_WIDTH))
+                cap_temp.release()
+
+                reader_thread = threading.Thread(
+                    target=self.read_frames_producer,
+                    args=(file_path, skip_frames),
+                    daemon=True
+                )
+                reader_thread.start()
+
+                progress_thread = threading.Thread(
+                    target=self._progress_updater,
+                    args=(file_idx, total_files),
+                    daemon=True
+                )
+                progress_thread.start()
+
+                batch_original_frames = []
+                batch_input_frames = []
+                batch_frame_counts = []
+                last_inference_time = time.time()
+
+                while True:
                     if self.stopped:
                         break
-                    should_wait = self.paused
 
-                if should_wait:
-                    self.resume_event.wait()
-                    continue
+                    try:
+                        item = self.frame_queue.get(timeout=2)
+                        if item is None:
+                            # 单个文件帧读取完成，等待队列排空
+                            time.sleep(0.1)
+                            break
+                    except queue.Empty:
+                        continue
 
-                try:
-                    item = self.frame_queue.get(timeout=1)
-                    if item is None:
-                        break
-                except queue.Empty:
-                    continue
+                    orig_frame, input_frame, frame_count = item
+                    batch_original_frames.append(orig_frame)
+                    batch_input_frames.append(input_frame)
+                    batch_frame_counts.append(frame_count)
 
-                frames, original_frames, current_times, video_filename, fps = item
+                    if len(batch_input_frames) >= self.BATCH_SIZE:
+                        self._run_batch_inference_optimized(
+                            batch_input_frames, batch_original_frames, batch_frame_counts,
+                            selected_classes, only_moving, annotate_objects,
+                            confidence_threshold, orig_w, orig_h,
+                            save_folder, file_path,
+                            prev_positions, stable_since, movement_buffer
+                        )
+                        current_time = time.time()
+                        if current_time > last_inference_time:
+                            self.stats['fps'] = len(batch_frame_counts) / (current_time - last_inference_time)
+                            last_inference_time = current_time
 
-                self.detect_and_save(
-                    frames, original_frames, model, target_classes, class_mapping,
-                    current_times, save_path, detection_info,
-                    only_movement_targets, video_filename, fps, confidence_threshold,
-                    annotate_on_screenshot=annotate_on_screenshot
-                )
+                        batch_original_frames.clear()
+                        batch_input_frames.clear()
+                        batch_frame_counts.clear()
 
-                if current_times:
-                    last_processed_time = current_times[-1]
-
-                if total_duration is None:
-                    with VideoCaptureContextManager(self.video_path_for_progress) as cap:
-                        if cap.isOpened():
-                            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                            fps_val = cap.get(cv2.CAP_PROP_FPS)
-                            total_duration = total_frames / fps_val if fps_val > 0 else 1.0
-                        else:
-                            total_duration = 100.0
-
-                progress = min(100.0, (last_processed_time / total_duration) * 100)
-
-                if self.progress_callback:
-                    self.progress_callback(progress)
-
-        except Exception as e:
-            show_error(f"处理帧时出错: {e}")
-        finally:
-            if self.progress_callback and not self.stopped:
-                self.progress_callback(100)
-        logging.info("帧处理结束")
-
-# YOLO类名列表
-yolo_classes = [
-    "人", "自行车", "小车", "摩托车", "飞机", "巴士", "火车", "货车", "船", "交通灯", "消防栓",
-    "停车标志", "停车计费器", "长椅", "鸟", "猫", "狗", "马", "羊", "牛", "大象",
-    "熊", "斑马", "长颈鹿", "背包", "雨伞", "手提包", "领带", "行李箱", "飞盘", "滑雪板",
-    "滑雪橇", "运动球", "风筝", "棒球棒", "棒球手套", "滑板", "冲浪板", "网球拍", "瓶子", "酒杯",
-    "茶杯", "叉子", "刀", "勺子", "碗", "香蕉", "苹果", "三明治", "橙子", "西兰花",
-    "胡萝卜", "热狗", "披萨", "甜甜圈", "蛋糕", "椅子", "沙发", "盆栽植物", "床", "餐桌",
-    "马桶", "电视", "笔记本电脑", "鼠标", "遥控器", "键盘", "手机", "微波炉", "烤箱", "烤面包机",
-    "水槽", "冰箱", "书", "时钟", "花瓶", "剪刀", "泰迪熊", "吹风机", "牙刷"
-]
-# COCO 数据集英文类别（与 YOLO 官方一致）
-coco_classes_en = [
-    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
-    "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
-    "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
-    "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard",
-    "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
-    "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
-    "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone",
-    "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
-    "hair drier", "toothbrush"
-]
-# 检查多边形是否封闭的函数
-def is_polygon_closed(roi_points):
-    if len(roi_points) >= 3:
-        return True
-    return roi_points[0] == roi_points[-1]
-
-# 检查多边形是否不交叉的函数
-def is_polygon_non_crossing(roi_points):
-    def orientation(p, q, r):
-        val = (q[1] - p[1]) * (r[0] - q[0]) - (q[0] - p[0]) * (r[1] - q[1])
-        if val == 0:
-            return 0
-        return 1 if val > 0 else 2
-
-    def on_segment(p, q, r):
-        return (q[0] <= max(p[0], r[0]) and q[0] >= min(p[0], r[0]) and
-            q[1] <= max(p[1], r[1]) and q[1] >= min(p[1], r[1]))
-
-    def do_intersect(p1, q1, p2, q2):
-        o1 = orientation(p1, q1, p2)
-        o2 = orientation(p1, q1, q2)
-        o3 = orientation(p2, q2, p1)
-        o4 = orientation(p2, q2, q1)
-        if o1 != o2 and o3 != o4:
-            return True
-        if o1 == 0 and on_segment(p1, p2, q1):
-            return True
-        if o2 == 0 and on_segment(p1, q2, q1):
-            return True
-        if o3 == 0 and on_segment(p2, p1, q2):
-            return True
-        if o4 == 0 and on_segment(p2, q1, q2):
-            return True
-        return False
-
-    n = len(roi_points)
-    for i in range(n):
-        for j in range(i + 2, n):
-            if i == 0 and j == n - 1:
-                continue
-            if do_intersect(roi_points[i], roi_points[(i + 1) % n], roi_points[j], roi_points[(j + 1) % n]):
-                return False
-    return True
-
-# 视频处理GUI类
-class VideoProcessorGUI:
-    def __init__(self, root):
-        self.root = root
-        self.core = VideoProcessingCore(progress_callback=self.update_progress)
-        self.model = None
-        self.video_paths = []
-        self.current_video_index = 0
-        self.processing_finished = False
-        self.create_widgets()
-        self.load_model()
-
-    def update_progress(self, progress):
-        self.progress_bar['value'] = progress
-        self.root.update_idletasks()
-
-    def create_widgets(self):
-        self.video_frame = self.create_frame("选择视频文件:")
-        self.video_frame.pack(pady=2)
-        self.video_entry = self.create_entry(self.video_frame)
-        self.create_button(self.video_frame, "浏览", self.select_video, "success")
-        self.save_path_frame = self.create_frame("截图保存路径:")
-        self.save_path_frame.pack(pady=2)
-        self.save_path_entry = self.create_entry(self.save_path_frame)
-        self.create_button(self.save_path_frame, "浏览", self.select_save_path, "info")
-        self.object_frame = ttk.Frame(self.root)
-        self.object_frame.pack(pady=2)
-        self.checkbox_vars = {cls: ttk.BooleanVar() for cls in yolo_classes}
-        for i in range(13):
-            row_frame = ttk.Frame(self.object_frame)
-            row_frame.pack(pady=2, anchor='w')
-            for j in range(7):
-                if i * 7 + j < len(yolo_classes):
-                    cls = yolo_classes[i * 7 + j]
-                    checkbox = ttk.Checkbutton(row_frame, text=cls, variable=self.checkbox_vars[cls])
-                    checkbox.pack(side='left', padx=5)
-        self.select_button = self.create_button(self.object_frame, "全选", self.toggle_select_all, "primary")
-        self.speed_group_frame = ttk.Labelframe(self.root, text="分析倍速是使用丢帧方式实现，对快速移动目标视频慎用")
-        self.speed_group_frame.pack(pady=5, fill='x', padx=5)
-        self.speed_frame = ttk.Frame(self.speed_group_frame)
-        self.speed_frame.pack(pady=2)
-        self.speed_var = ttk.IntVar()
-        self.speed_var.set(1)
-        self.create_label(self.speed_frame, "选择分析倍速:")
-        speeds = [1, 2, 4, 8, 16, 24, 32, 48, 64]
-        for speed in speeds:
-            radio = ttk.Radiobutton(self.speed_frame, text=f"{speed}X", variable=self.speed_var, value=speed)
-            radio.pack(side='left', padx=2)
-        self.roi_frame = ttk.Frame(self.root)
-        self.roi_frame.pack(pady=2)
-        self.roi_button = self.create_button(self.roi_frame, "选择关注区域", self.select_roi, "warning")
-        self.roi_status_label = self.create_label(self.roi_frame, "没有选取关注区域", anchor='center')
-        self.button_frame = ttk.Frame(self.root)
-        self.button_frame.pack(pady=2)
-        self.start_button = self.create_button(self.button_frame, "开始处理", self.start_processing, "primary")
-        self.pause_button = self.create_button(self.button_frame, "暂停处理", self.pause_processing, "secondary")
-        self.create_button(self.button_frame, "结束处理", self.stop_processing, "danger")
-
-        self.option_frame = ttk.Frame(self.root)
-        self.option_frame.pack(pady=2)
-
-        self.only_movement_var = ttk.BooleanVar(value=True)
-        movement_checkbox = ttk.Checkbutton(self.option_frame, text="只对活动目标截图", variable=self.only_movement_var)
-        movement_checkbox.pack(side='left', padx=5)
-
-        self.annotate_var = ttk.BooleanVar(value=False)
-        annotate_checkbox = ttk.Checkbutton(self.option_frame, text="标注目标", variable=self.annotate_var)
-        annotate_checkbox.pack(side='left', padx=5)
-
-        self.note_frame = ttk.Frame(self.root)
-        self.note_frame.pack(pady=2)
-        self.create_label(self.note_frame, "注意：分析过程中不要关闭程序，在弹出【视频分析已结束】窗口后再关闭。", anchor='center')
-        Progress_frame = ttk.Frame(self.root)
-        Progress_frame.pack(pady=0, padx=5, fill='x')
-        self.progress_label = ttk.Label(Progress_frame, text="等待处理视频")
-        self.progress_label.pack(pady=5, fill='x')
-        self.progress_bar = ttk.Progressbar(Progress_frame, orient='horizontal', mode='determinate')
-        self.progress_bar.pack(pady=5, fill='x', expand=True)
-
-    def create_frame(self, label_text):
-        frame = ttk.Frame(self.root)
-        frame.pack(pady=10)
-        self.create_label(frame, label_text)
-        return frame
-
-    def create_entry(self, frame):
-        entry = ttk.Entry(frame, width=50)
-        entry.pack(side='left', padx=5)
-        return entry
-
-    def create_button(self, frame, text, command, bootstyle):
-        button = ttk.Button(frame, text=text, command=command, bootstyle=bootstyle)
-        button.pack(side='left', padx=5)
-        return button
-
-    def create_label(self, frame, text, anchor=None):
-        label = ttk.Label(frame, text=text)
-        if anchor:
-            label.pack(anchor=anchor)
-        else:
-            label.pack(side='left', padx=5)
-        return label
-
-    def select_video(self):
-        try:
-            self.video_paths = filedialog.askopenfilenames(filetypes=[("视频文件", "*.mp4;*.avi")])
-            if self.video_paths:
-                video_paths_str = ", ".join(self.video_paths)
-                self.video_entry.delete(0, 'end')
-                self.video_entry.insert(0, video_paths_str)
-        except Exception as e:
-            show_error(f"选择视频文件时出错: {e}")
-
-    def select_save_path(self):
-        try:
-            save_path = filedialog.askdirectory()
-            if save_path:
-                self.save_path_entry.delete(0, 'end')
-                self.save_path_entry.insert(0, save_path)
-        except Exception as e:
-            show_error(f"选择保存路径时出错: {e}")
-
-    def get_selected_classes(self):
-        return [text for text, var in self.checkbox_vars.items() if var.get()]
-
-    def load_model(self):
-        # 读取配置文件
-        config = configparser.ConfigParser()
-        config.read("set.ini")
-        # 获取模型路径（从Model section读取，带默认值）
-        model_path = get_config_value(config, "Model", "model_path", "./models/yolo11x.pt")
-
-        try:
-            # 检查模型文件是否存在
-            if not os.path.exists(model_path):
-                show_error(f"模型文件不存在: {model_path}")
-                return
-
-            # 先加载模型到CPU
-            model = YOLO(model_path)
-
-            # 测试CUDA可用性并尝试迁移
-            if torch.cuda.is_available():
-                try:
-                    # # 创建一个极小的 dummy 图像张量 (1x3x64x64)，并移动到 GPU
-                    dummy_input = torch.zeros(1, 3, 64, 64).cuda()  # 小尺寸输入
-                    model.model.cuda() # 确保模型在 GPU 上
-                    _ = model.predict(dummy_input, device=0, verbose=False)
-                    self.model = model
-                    self.model.to('cuda:0')
-                    logging.info(f"已启用CUDA加速，模型路径: {model_path}")
-                    print(f"使用GPU推理，模型路径: {model_path}")
-                except Exception as cuda_error:
-                    logging.warning(f"CUDA推理失败，退回CPU: {cuda_error}")
-                    self.model = YOLO(model_path)
-                    self.model.to('cpu')
-                    logging.info(f"使用CPU推理，模型路径: {model_path}")
-            else:
-                # 直接使用CPU
-                self.model = model
-                self.model.to('cpu')
-                logging.info(f"CUDA不可用，使用CPU推理，模型路径: {model_path}")
-
-        except Exception as e:
-            show_error(f"模型加载失败: {e}")
-            logging.error(f"模型加载失败: {e}")
-
-    def start_processing(self):
-        logging.info("开始处理视频")
-        save_path = self.save_path_entry.get()
-        selected_classes = self.get_selected_classes()
-        speed_multiplier = self.speed_var.get()
-        only_movement_targets = self.only_movement_var.get()
-        annotate_on_screenshot = self.annotate_var.get()
-
-        if not self.video_paths or not save_path:
-            show_error("请选择视频文件和截图保存路径")
-            return
-        if not selected_classes:
-            show_error("请选择至少一个检测对象")
-            return
-        if not os.path.exists(save_path):
-            try:
-                os.makedirs(save_path)
-            except Exception as e:
-                show_error(f"创建保存路径时出错: {e}")
-                return
-        if self.model is None:
-            show_error("模型加载失败，请检查模型文件是否存在")
-            return
-
-        class_mapping = {
-            0: "人", 1: "自行车", 2: "小车", 3: "摩托车", 4: "飞机", 5: "巴士", 6: "火车", 7: "货车", 8: "船", 9: "交通灯", 10: "消防栓",
-            11: "停车标志", 12: "停车计费器", 13: "长椅", 14: "鸟", 15: "猫", 16: "狗", 17: "马", 18: "羊", 19: "牛", 20: "大象",
-            21: "熊", 22: "斑马", 23: "长颈鹿", 24: "背包", 25: "雨伞", 26: "手提包", 27: "领带", 28: "行李箱", 29: "飞盘", 30: "滑雪板",
-            31: "滑雪橇", 32: "运动球", 33: "风筝", 34: "棒球棒", 35: "棒球手套", 36: "滑板", 37: "冲浪板", 38: "网球拍", 39: "瓶子", 40: "酒杯",
-            41: "茶杯", 42: "叉子", 43: "刀", 44: "勺子", 45: "碗", 46: "香蕉", 47: "苹果", 48: "三明治", 49: "橙子", 50: "西兰花",
-            51: "胡萝卜", 52: "热狗", 53: "披萨", 54: "甜甜圈", 55: "蛋糕", 56: "椅子", 57: "沙发", 58: "盆栽植物", 59: "床", 60: "餐桌",
-            61: "马桶", 62: "电视", 63: "笔记本电脑", 64: "鼠标", 65: "遥控器", 66: "键盘", 67: "手机", 68: "微波炉", 69: "烤箱", 70: "烤面包机",
-            71: "水槽", 72: "冰箱", 73: "书", 74: "时钟", 75: "花瓶", 76: "剪刀", 77: "泰迪熊", 78: "吹风机", 79: "牙刷"
-        }
-        target_classes = [key for key, value in class_mapping.items() if value in selected_classes]
-
-        self.start_button.config(state='disabled')
-        self.roi_button.config(state='disabled')
-        self.pause_button.config(state='normal')
-        self.current_video_index = 0
-        self.processing_finished = False
-        with self.core.pause_stop_lock:
-            self.core.paused = False
-            self.core.stopped = False
-
-        def on_all_done():
-            if not self.processing_finished:
-                self.processing_finished = True
-
-                def gui_update():
-                    logging.info("视频分析已结束")
-                    self.start_button.config(state='normal')
-                    self.roi_button.config(state='normal')
-                    self.progress_bar['value'] = 0
-                    self.progress_label.config(text="等待处理视频")
-                    messagebox.showinfo("提示", "视频分析已结束！")
-
-                self.root.after(100, gui_update)
-
-        def process_chain():
-            total_videos = len(self.video_paths)
-            while self.current_video_index < total_videos and not self.core.stopped:
-                video_path = self.video_paths[self.current_video_index]
-                video_filename = os.path.basename(video_path)
-
-                self.progress_label.config(
-                    text=f"正在处理 ({self.current_video_index + 1}/{total_videos}): {video_filename}"
-                )
-                self.progress_bar['value'] = 0
-                logging.info(f"开始处理视频: {video_path}")
-
-                try:
-                    self.core.start_processing(
-                        video_path=video_path,
-                        model=self.model,
-                        target_classes=target_classes,
-                        class_mapping=class_mapping,
-                        save_path=save_path,
-                        speed_multiplier=speed_multiplier,
-                        only_movement_targets=only_movement_targets,
-                        start_button=self.start_button,
-                        roi_button=self.roi_button,
-                        confidence_threshold=confidence_threshold,
-                        annotate_on_screenshot=annotate_on_screenshot
+                if batch_input_frames:
+                    self._run_batch_inference_optimized(
+                        batch_input_frames, batch_original_frames, batch_frame_counts,
+                        selected_classes, only_moving, annotate_objects,
+                        confidence_threshold, orig_w, orig_h,
+                        save_folder, file_path,
+                        prev_positions, stable_since, movement_buffer
                     )
-                except Exception as e:
-                    # 错误处理...直接跳过
-                    pass
-                finally:
-                    self.current_video_index += 1
 
-            self.root.after(100, on_all_done)
+                progress_thread.join(timeout=1)
+                reader_thread.join(timeout=2)
 
-        Thread(target=process_chain, daemon=True).start()
+                # 单个文件处理完成后，不关闭预览 
+                if self._preview_active and not self.stopped:
+                    # 显示临时提示，告知正在切换文件
+                    self.root.after(0, lambda: self._preview_label.config(
+                        text=f"第 {file_idx+1} 个文件处理完成，即将切换到下一个...",
+                        image=""
+                    ))
+
+            if not self.stopped:
+                self.update_status("所有文件处理完成！")
+                # 所有文件处理完成后，清空预览并显示完成提示
+                if self._preview_active:
+                    self.root.after(0, lambda: self._preview_label.config(
+                        text="所有文件处理完成，预览结束",
+                        image=""
+                    ))
+        except Exception as e:
+            self.log_message(f"处理出错: {e}\n{traceback.format_exc()}")
+            self.update_status(f"错误: {str(e)}")
+        finally:
+            def reset_ui():
+                self.start_button.config(state=NORMAL)
+                self.pause_button.config(state=DISABLED)
+                self.stop_button.config(state=DISABLED)
+                if self.stopped:
+                    self.update_status("处理已停止")
+                    self.log_message("处理已停止")
+                    if self._preview_active:
+                        self._preview_label.config(text="处理已停止，预览中断", image="")
+                else:
+                    self.update_status("所有文件处理完成！")
+            self.root.after_idle(reset_ui)
+
+            # 所有任务结束后，不强制关闭预览，仅清空队列
+            while not self._preview_queue.empty():
+                try:
+                    self._preview_queue.get_nowait()
+                except:
+                    break
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+    #---------------------------------------------------------
+    def _run_batch_inference_optimized(self, batch_input_frames, batch_original_frames, batch_frame_counts,
+                                    selected_classes, only_moving, annotate_objects,
+                                    confidence_threshold, orig_w, orig_h,
+                                    save_folder, file_path,
+                                    prev_positions, stable_since, movement_buffer):
+        try:
+            if CUDA_STREAM is not None:
+                with torch.cuda.stream(CUDA_STREAM):
+                    results_list = self.model(
+                        batch_input_frames,
+                        conf=confidence_threshold,
+                        iou=self.NMS_IOU_THRESHOLD,
+                        verbose=False
+                    )
+                torch.cuda.current_stream().synchronize()
+            else:
+                results_list = self.model(
+                    batch_input_frames,
+                    conf=confidence_threshold,
+                    iou=self.NMS_IOU_THRESHOLD,
+                    verbose=False
+                )
+
+            for idx, results in enumerate(results_list):
+                frame = batch_original_frames[idx]
+                frame_count = batch_frame_counts[idx]
+                if not (results and len(results.boxes) > 0):
+                    # 即使无检测，也推送空标注帧
+                    if self._preview_active:
+                        try:
+                            if self._preview_queue.full():
+                                self._preview_queue.get_nowait()
+                            self._preview_queue.put_nowait((frame.copy(), frame_count, []))
+                        except queue.Full:
+                            pass
+                    continue
+
+                # 提取原始检测结果
+                boxes = results.boxes.xyxy.cpu().numpy()
+                scores = results.boxes.conf.cpu().numpy()
+                class_ids = results.boxes.cls.cpu().numpy().astype(int)
+
+                # 缩放回原始尺寸
+                scale_x = orig_w / self.INFERENCE_SIZE
+                scale_y = orig_h / self.INFERENCE_SIZE
+                boxes_original = boxes.copy()
+                boxes_original[:, [0, 2]] *= scale_x
+                boxes_original[:, [1, 3]] *= scale_y
+                boxes_original = np.clip(boxes_original, 0, [orig_w, orig_h, orig_w, orig_h])
+
+                # 过滤未勾选类别
+                filtered_boxes = []
+                filtered_scores = []
+                filtered_class_ids = []
+                for box, score, cls_id in zip(boxes_original, scores, class_ids):
+                    if cls_id >= len(COCO_CLASSES):
+                        continue
+                    class_name = COCO_CLASSES[cls_id]
+                    if class_name not in selected_classes:
+                        continue
+                    filtered_boxes.append(box)
+                    filtered_scores.append(score)
+                    filtered_class_ids.append(cls_id)
+                if not filtered_boxes:
+                    if self._preview_active:
+                        try:
+                            if self._preview_queue.full():
+                                self._preview_queue.get_nowait()
+                            self._preview_queue.put_nowait((frame.copy(), frame_count, []))
+                        except queue.Full:
+                            pass
+                    continue
+
+                #跨类别高 IoU 去重 
+                detections = [(filtered_scores[i], filtered_boxes[i], filtered_class_ids[i]) for i in range(len(filtered_scores))]
+                detections.sort(key=lambda x: x[0], reverse=True)
+                to_keep = [True] * len(detections)
+                for i in range(len(detections)):
+                    if not to_keep[i]:
+                        continue
+                    score_i, box_i, cls_i = detections[i]
+                    for j in range(i + 1, len(detections)):
+                        if not to_keep[j]:
+                            continue
+                        score_j, box_j, cls_j = detections[j]
+                        if cls_i == cls_j:
+                            continue
+                        x1, y1, x2, y2 = box_i
+                        x1_p, y1_p, x2_p, y2_p = box_j
+                        inter_x1 = max(x1, x1_p)
+                        inter_y1 = max(y1, y1_p)
+                        inter_x2 = min(x2, x2_p)
+                        inter_y2 = min(y2, y2_p)
+                        if inter_x2 > inter_x1 and inter_y2 > inter_y1:
+                            inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+                            area1 = (x2 - x1) * (y2 - y1)
+                            area2 = (x2_p - x1_p) * (y2_p - y1_p)
+                            union_area = area1 + area2 - inter_area
+                            iou = inter_area / union_area if union_area > 0 else 0.0
+                            if iou > 0.85:
+                                to_keep[j] = False
+
+                kept_detections = [detections[i] for i in range(len(detections)) if to_keep[i]]
+                if not kept_detections:
+                    if self._preview_active:
+                        try:
+                            if self._preview_queue.full():
+                                self._preview_queue.get_nowait()
+                            self._preview_queue.put_nowait((frame.copy(), frame_count, []))
+                        except queue.Full:
+                            pass
+                    continue
+                kept_scores, kept_boxes, kept_class_ids = zip(*kept_detections)
+                kept_scores = np.array(kept_scores)
+                kept_boxes = np.array(kept_boxes)
+                kept_class_ids = np.array(kept_class_ids)
+
+                # 构造预览标注信息（仅 ROI 内目标）
+                preview_annotate_info = []
+                for box, score, cls_id in zip(kept_boxes, kept_scores, kept_class_ids):
+                    x1, y1, x2, y2 = box.astype(int)
+                    if not self._is_point_in_roi((x1 + x2) / 2.0, (y1 + y2) / 2.0):
+                        continue
+                    class_name = COCO_CLASSES[cls_id]
+                    class_display = COCO_CLASS_MAPPING.get(class_name, class_name)
+                    preview_annotate_info.append((x1, y1, x2, y2, class_name, float(score)))
+
+                # 将帧 + 标注 一次性入队（不再分离）
+                if self._preview_active:
+                    try:
+                        if self._preview_queue.full():
+                            self._preview_queue.get_nowait()
+                        # 现在队列中每个 item 是 (frame, frame_idx, annotate_info)
+                        self._preview_queue.put_nowait((frame.copy(), frame_count, preview_annotate_info))
+                    except queue.Full:
+                        pass
+
+                # 截图逻辑 
+                for box, score, cls_id in zip(kept_boxes, kept_scores, kept_class_ids):
+                    x1, y1, x2, y2 = box.astype(int)
+                    current_box = (x1, y1, x2, y2)
+                    if not self._is_point_in_roi((x1 + x2) / 2.0, (y1 + y2) / 2.0):
+                        continue
+
+                    is_first_appearance = True
+                    for recorded_box, recorded_cls in self.roi_entered_boxes:
+                        if recorded_cls == cls_id and self._box_iou_simple(current_box, recorded_box) > self.ROI_IOU_THRESHOLD:
+                            is_first_appearance = False
+                            break
+
+                    should_process = False
+                    if only_moving:
+                        if is_first_appearance:
+                            should_process = True
+                        else:
+                            obj_key = f"{cls_id}_{x1}_{y1}_{x2}_{y2}"
+                            if self._is_target_moving_enhanced(obj_key, current_box, frame_count / 30,
+                                                            prev_positions, stable_since, movement_buffer):
+                                should_process = True
+                            prev_positions[obj_key] = current_box
+                    else:
+                        should_process = True
+
+                    if not should_process:
+                        continue
+
+                    if is_first_appearance:
+                        self.roi_entered_boxes.append((current_box, cls_id))
+
+                    class_name = COCO_CLASSES[cls_id]
+                    class_display = COCO_CLASS_MAPPING.get(class_name, class_name)
+                    self.stats['total_targets'] += 1
+                    self.stats['targets_by_class'][class_display] = self.stats['targets_by_class'].get(class_display, 0) + 1
+
+                    annotate_frame = frame.copy() if annotate_objects else frame
+                    if annotate_objects:
+                        color = COLORS[hash(class_name) % len(COLORS)]
+                        cv2.rectangle(annotate_frame, (x1, y1), (x2, y2), color, 2)
+                        cv2.putText(annotate_frame, f"{class_name} {score:.2f}",
+                                    (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
+
+                    safe_base = sanitize_filename(os.path.splitext(os.path.basename(file_path))[0])
+                    safe_class = sanitize_filename(class_display)
+                    save_path = os.path.join(save_folder, f"{safe_base}_frame{frame_count}_{safe_class}.jpg")
+                    msg = self.save_image_safely(annotate_frame, save_path)
+                    self.log_message(f"发现目标: {class_display} 置信度{score:.2f} → {msg}")
+
+        except Exception as e:
+            self.log_message(f"批量推理出错: {e}")
+            import traceback
+            self.log_message(traceback.format_exc())
+
+    #---------------------------------------------------------
+    def start_processing(self):
+        if not self.file_paths:
+            self.log_message("错误: 未选择视频文件")
+            return
+        if not self.save_folder:
+            self.log_message("错误: 未选择保存路径")
+            return
+        try:
+            with open(os.path.join(self.save_folder, "test.tmp"), 'w') as _:
+                pass
+            os.remove(os.path.join(self.save_folder, "test.tmp"))
+        except Exception as e:
+            Messagebox.showerror("路径错误", f"保存路径不可写: {e}")
+            return
+
+        selected = [self.class_names[i] for i, v in enumerate(self.class_vars) if v.get()]
+        if not selected:
+            self.log_message("错误: 未选择任何目标类")
+            return
+
+        try:
+            skip_frames = max(1, min(64, int(self.speed_entry.get())))
+        except ValueError:
+            skip_frames = 1
+        try:
+            conf = max(0.0, min(1.0, float(self.confidence_entry.get())))
+        except ValueError:
+            conf = 0.1
+
+        only_moving = self.only_moving_var.get() == 1
+        annotate = self.annotate_var.get() == 1
+
+        self._auto_adjust_batch_size()
+
+        self.paused = False
+        self.stopped = False
+        # 重置暂停显示标志
+        self.paused_display = False
+        self.start_button.config(state=DISABLED)
+        self.pause_button.config(state=NORMAL)
+        self.stop_button.config(state=NORMAL)
+        self.log_message("开始处理...")
+
+        threading.Thread(target=self.process_videos, args=(
+            self.file_paths, self.save_folder, selected, skip_frames, only_moving, annotate, conf
+        ), daemon=True).start()
 
     def pause_processing(self):
-        with self.core.pause_stop_lock:
-            self.core.paused = not self.core.paused
-            if self.core.paused:
-                self.core.resume_event.clear()  # 进入暂停
-                self.pause_button.config(text="继续处理")
+        self.paused = not self.paused
+        if self.paused:
+            self.pause_button.config(text="继续处理")
+            self.log_message("处理已暂停")
+            # 设置暂停显示标志
+            self.paused_display = True
+            self.update_status("处理已暂停...")
+        else:
+            self.pause_button.config(text="暂停处理")
+            self.log_message("处理已继续")
+            # 清除暂停显示标志
+            self.paused_display = False
+            if self.current_processing_status:
+                self.update_status(self.current_processing_status)
             else:
-                self.core.resume_event.set()    # 恢复执行
-                self.pause_button.config(text="暂停处理")
+                self.update_status("处理中...")
 
     def stop_processing(self):
-        with self.core.pause_stop_lock:
-            self.core.stopped = True
-            self.core.paused = False
-            self.core.resume_event.set()  # 唤醒等待中的线程
-            self.pause_button.config(state='disabled')
-            self.start_button.config(state='normal')
-            self.roi_button.config(state='normal')
-            self.current_video_index = 0
-
-        # 清空队列
-        while not self.core.frame_queue.empty():
+        if not self.stopped:
+            self.stopped = True
+            self.paused = False
+            self.paused_display = False 
+            self.current_processing_status = ""
+            self.log_message("正在停止处理...")
+            self.update_status("正在停止...")
+        while not self.save_queue.empty():
             try:
-                self.core.frame_queue.get_nowait()
+                self.save_queue.get_nowait()
+                self.save_queue.task_done()
+            except:
+                break
+
+    def select_all_classes(self):
+        for v in self.class_vars:
+            v.set(1)
+        self.log_message("全选所有类别")
+
+    def deselect_all_classes(self):
+        for v in self.class_vars:
+            v.set(0)
+        self.log_message("取消已选目标")
+
+    def update_stats_periodically(self):
+        """定期更新统计面板"""
+        if self._ui_ready:
+            self.fps_label.config(text=f"FPS(每秒处理帧数): {self.stats['fps']:.1f}")
+            self.targets_label.config(text=f"目标截图总数: {self.stats['total_targets']}")
+            if self.gpu_handle is not None:
+                try:
+                    mem_info = pynvml.nvmlDeviceGetMemoryInfo(self.gpu_handle)
+                    gpu_mem_gb = mem_info.used / (1024**3)
+                    self.gpu_label.config(text=f"占用 GPU 显存: {gpu_mem_gb:.1f} GB")
+                except:
+                    self.gpu_label.config(text="占用 GPU 显存: 错误")
+            else:
+                self.gpu_label.config(text="占用 GPU 显存: N/A")
+        self.root.after(500, self.update_stats_periodically)
+
+    def __del__(self):
+        if hasattr(self, 'save_queue'):
+            self.save_queue.put(None)
+        if PYNVML_AVAILABLE and hasattr(self, 'gpu_handle'):
+            try:
+                pynvml.nvmlShutdown()
             except:
                 pass
 
-    def toggle_select_all(self):
-        all_selected = all(var.get() for var in self.checkbox_vars.values())
-        if all_selected:
-            for var in self.checkbox_vars.values():
-                var.set(False)
-            self.select_button.config(text="全选")
-        else:
-            for var in self.checkbox_vars.values():
-                var.set(True)
-            self.select_button.config(text="取消全选")
-
-    def select_roi(self):
-        try:
-            if self.video_paths:
-                cap = cv2.VideoCapture(self.video_paths[0])
-                ret, frame = cap.read()
-                cap.release()
-                if ret:
-                    cv2.namedWindow("Select ROI", cv2.WINDOW_NORMAL)
-                    cv2.resizeWindow("Select ROI", 800, 600)
-                    roi_points = []
-                    temp_frame = frame.copy()
-
-                    def mouse_callback(event, x, y, flags, param):
-                        nonlocal temp_frame
-                        if event == cv2.EVENT_LBUTTONDOWN:
-                            roi_points.append((x, y))
-                            temp_frame = frame.copy()
-                            for i, p in enumerate(roi_points):
-                                cv2.circle(temp_frame, p, 5, (0, 0, 255), -1)
-                                if i > 0:
-                                    cv2.line(temp_frame, roi_points[i - 1], p, (0, 255, 0), 2)
-                            if len(roi_points) > 1:
-                                cv2.line(temp_frame, roi_points[-1], roi_points[0], (0, 255, 0), 2)
-                        elif event == cv2.EVENT_RBUTTONDOWN and roi_points:
-                            roi_points.pop()
-                            temp_frame = frame.copy()
-                            for i, p in enumerate(roi_points):
-                                cv2.circle(temp_frame, p, 5, (0, 0, 255), -1)
-                                if i > 0:
-                                    cv2.line(temp_frame, roi_points[i - 1], p, (0, 255, 0), 2)
-                            if len(roi_points) > 1:
-                                cv2.line(temp_frame, roi_points[-1], roi_points[0], (0, 255, 0), 2)
-                    cv2.setMouseCallback("Select ROI", mouse_callback)
-                    while True:
-                        cv2.imshow("Select ROI", temp_frame)
-                        key = cv2.waitKey(1) & 0xFF
-                        if key == ord('r'):
-                            roi_points = []
-                            temp_frame = frame.copy()
-                        elif cv2.getWindowProperty("Select ROI", cv2.WND_PROP_VISIBLE) < 1:
-                            if roi_points:
-                                if is_polygon_closed(roi_points) and is_polygon_non_crossing(roi_points):
-                                    self.core.roi_points = roi_points
-                                    self.roi_status_label.config(text="已选取关注区域")
-                                    self.roi_button.config(text="取消选取", command=self.cancel_roi)
-                                else:
-                                    show_error("选取的关注区域不合法，请确保区域封闭且不交叉。")
-                            cv2.destroyAllWindows()
-                            break
-            else:
-                show_error("请先选择视频文件")
-        except Exception as e:
-            show_error(f"选择关注区域时出错: {e}")
-
-    def cancel_roi(self):
-        self.core.roi_points = []
-        self.roi_status_label.config(text="未选取关注区域")
-        self.roi_button.config(text="选取关注区域", command=self.select_roi)
 
 if __name__ == "__main__":
-    config = configparser.ConfigParser()
-
-    # 默认参数（无论是否读取成功都可用）
-    DEFAULT_PARAMS = {
-        'batch_size': 2,
-        'frame_queue_size': 10,
-        'confidence_threshold': 0.3,
-        'roi_iou_threshold': 0.20,
-        'movement_iou_threshold': 0.90,
-        'movement_relative_threshold': 0.02,
-        'movement_consecutive_frames': 5,
-        'movement_stable_seconds': 5,
-        'model_path': './models/yolo11x.pt'
-    }
-
-    # 尝试读取或创建 set.ini
-    config_created = False
-    if not os.path.exists('set.ini'):
-        try:
-            # 写入默认配置
-            config['Parameters'] = {
-                'batch_size': str(DEFAULT_PARAMS['batch_size']),
-                'frame_queue_size': str(DEFAULT_PARAMS['frame_queue_size']),
-                'confidence_threshold': str(DEFAULT_PARAMS['confidence_threshold']),
-                'roi_iou_threshold': str(DEFAULT_PARAMS['roi_iou_threshold'])
-            }
-            config['target'] = {
-                'movement_iou_threshold': str(DEFAULT_PARAMS['movement_iou_threshold']),
-                'movement_relative_threshold': str(DEFAULT_PARAMS['movement_relative_threshold']),
-                'movement_consecutive_frames': str(DEFAULT_PARAMS['movement_consecutive_frames']),
-                'movement_stable_seconds': str(DEFAULT_PARAMS['movement_stable_seconds'])
-            }
-            config['Model'] = {
-                'model_path': DEFAULT_PARAMS['model_path']
-            }
-            with open('set.ini', 'w', encoding='utf-8') as f:
-                config.write(f)
-            logging.info("set.ini 已成功生成。")
-            config_created = True
-        except Exception as e:
-            # 无法创建配置文件，记录日志并提示用户
-            logging.warning(f"无法创建 set.ini: {e}")
-            messagebox.showwarning("提示", 
-                "无法自动创建配置文件 set.ini（可能无写入权限）。\n"
-                "程序将使用默认参数运行。\n"
-                "如需自定义设置，请手动创建 set.ini 文件。")
-    else:
-        try:
-            config.read('set.ini', encoding='utf-8')
-        except Exception as e:
-            logging.error(f"读取 set.ini 失败: {e}")
-            messagebox.showerror("错误", f"读取 set.ini 出错：{e}\n将使用默认参数。")
-
-    # 安全地获取参数（优先从 config 读，失败则用默认值）
-    def safe_get(section, option, default):
-        try:
-            if config.has_section(section) and config.has_option(section, option):
-                value = config.get(section, option)
-                if isinstance(default, int):
-                    return int(value)
-                elif isinstance(default, float):
-                    return float(value)
-                else:
-                    return value
-        except Exception as e:
-            logging.warning(f"读取配置 {section}.{option} 失败，使用默认值: {default}")
-        return default
-
-    BATCH_SIZE = safe_get('Parameters', 'batch_size', DEFAULT_PARAMS['batch_size'])
-    FRAME_QUEUE_SIZE = safe_get('Parameters', 'frame_queue_size', DEFAULT_PARAMS['frame_queue_size'])
-    confidence_threshold = safe_get('Parameters', 'confidence_threshold', DEFAULT_PARAMS['confidence_threshold'])
-    roi_iou_threshold = safe_get('Parameters', 'roi_iou_threshold', DEFAULT_PARAMS['roi_iou_threshold'])
-
-    movement_iou_threshold = safe_get('target', 'movement_iou_threshold', DEFAULT_PARAMS['movement_iou_threshold'])
-    movement_relative_threshold = safe_get('target', 'movement_relative_threshold', DEFAULT_PARAMS['movement_relative_threshold'])
-    movement_consecutive_frames = safe_get('target', 'movement_consecutive_frames', DEFAULT_PARAMS['movement_consecutive_frames'])
-    movement_stable_seconds = safe_get('target', 'movement_stable_seconds', DEFAULT_PARAMS['movement_stable_seconds'])
-   
-    # 同时输出到控制台和文件（确保调试时能看到错误）
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler('video_analysis.log', encoding='utf-8', mode='w'),
-            logging.StreamHandler(sys.stdout)  # 输出到控制台
-        ]
-    )
-
-    root = ttk.Window(themename='darkly')
-    root.title("COCO数据集目标检测 by geckotao")
-
-    if getattr(sys, 'frozen', False):
-        base_path = sys._MEIPASS
-    else:
-        base_path = os.path.dirname(os.path.abspath(__file__))
-
-    try:
-        from PIL import Image, ImageTk
-        icon_path = os.path.join(base_path, 'icon.png')
-        if os.path.exists(icon_path):
-            icon_img = Image.open(icon_path)
-            icon_photo = ImageTk.PhotoImage(icon_img)
-            root.call('wm', 'iconphoto', root._w, icon_photo)
-        else:
-            print("图标文件icon.png不存在，使用默认图标")
-    except Exception as e:
-        print(f"设置窗口图标时出错: {e}")
-
-    gui = VideoProcessorGUI(root)
+    # 初始化ttkbootstrap窗口，可选择主题（如darkly、yeti、simplex、cyborg、superhero等）
+    root = ttk.Window(themename="darkly")
+    app = VideoDetectionApp(root)
     root.mainloop()
