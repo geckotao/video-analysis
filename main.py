@@ -106,7 +106,7 @@ class VideoDetectionApp:
         self.root.geometry("1200x800")
         self.root.resizable(True, True)
 
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.ico")
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "favicon.ico")
         if os.path.exists(icon_path):
             try:
                 self.root.iconbitmap(icon_path)
@@ -127,12 +127,11 @@ class VideoDetectionApp:
 
         # 同步预览相关变量 
         self._preview_window = None
-        self._preview_queue = queue.Queue(maxsize=2)
+        self._preview_queue = queue.Queue(maxsize=10)
         self._preview_annotate_queue = queue.Queue(maxsize=2)
         self._preview_active = False
         self._preview_label = None  # 嵌入界面的预览标签（不再是窗口）
         self._current_preview_photo = None  # 保留预览图像引用，防止被回收
-        self._preview_placeholder_text = "等待视频帧数据..."
         self.current_frame = 0
         self.total_frames = 0
         self._current_file_idx = -1
@@ -574,7 +573,7 @@ class VideoDetectionApp:
         self._roi_window.geometry("820x720")  # 宽+20, 高+120（含控件）
         self._roi_window.transient(self.root)
         self._roi_window.grab_set()
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.ico")
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "favicon.ico")
         if os.path.exists(icon_path):
             try:
                 self._roi_window.iconbitmap(icon_path)
@@ -815,54 +814,53 @@ class VideoDetectionApp:
     def _update_preview_display(self):
         if not self._preview_active:
             return
+
+        frame_processed = False
         try:
             item = self._preview_queue.get_nowait()
-            if not isinstance(item, (tuple, list)) or len(item) != 3:
-                self.log_message(f"[WARN] 预览队列收到非法数据: {item}")
-                return
-            frame, frame_idx, annotate_info = item
-            if frame is None:
-                # 无帧提示
-                self._preview_label.config(text="等待视频帧...", image="")
-                self._current_preview_photo = None
-                return
+            if isinstance(item, (tuple, list)) and len(item) == 3:
+                frame, frame_idx, annotate_info = item
+                if frame is not None:
+                    # 绘制ROI
+                    if self.roi is not None:
+                        cv2.polylines(frame, [self.roi], isClosed=True, color=(0, 255, 0), thickness=2)
 
-            # 绘制ROI
-            if self.roi is not None:
-                cv2.polylines(frame, [self.roi], isClosed=True, color=(0, 255, 0), thickness=2)
+                    # 绘制标注
+                    for (x1, y1, x2, y2, class_display, score) in annotate_info:
+                        color = COLORS[hash(class_display) % len(COLORS)]
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                        text = f"{class_display} {score:.2f}"
+                        text_size, _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                        text_x = x1
+                        text_y = y1 - 10 if y1 - 10 > 0 else y1 + text_size[1] + 10
+                        cv2.rectangle(
+                            frame,
+                            (text_x, text_y - text_size[1] - 2),
+                            (text_x + text_size[0] + 2, text_y + 2),
+                            color,
+                            -1
+                        )
+                        cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
-            # 绘制标注
-            for (x1, y1, x2, y2, class_display, score) in annotate_info:
-                color = COLORS[hash(class_display) % len(COLORS)]
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                text = f"{class_display} {score:.2f}"
-                text_size, _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-                text_x = x1
-                text_y = y1 - 10 if y1 - 10 > 0 else y1 + text_size[1] + 10
-                cv2.rectangle(
-                    frame,
-                    (text_x, text_y - text_size[1] - 2),
-                    (text_x + text_size[0] + 2, text_y + 2),
-                    color,
-                    -1
-                )
-                cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
-            # 转换并显示
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            pil_image = Image.fromarray(rgb_frame)
-            preview_width = self._preview_label.winfo_width() or 600
-            preview_height = self._preview_label.winfo_height() or 400
-            pil_image.thumbnail((preview_width, preview_height), Image.LANCZOS)
-            self._current_preview_photo = ImageTk.PhotoImage(pil_image)
-            self._preview_label.config(image=self._current_preview_photo, text="")
-            self._preview_label.image = self._current_preview_photo
+                    # 转换并显示
+                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    pil_image = Image.fromarray(rgb_frame)
+                    preview_width = self._preview_label.winfo_width() or 600
+                    preview_height = self._preview_label.winfo_height() or 400
+                    pil_image.thumbnail((preview_width, preview_height), Image.LANCZOS)
+                    self._current_preview_photo = ImageTk.PhotoImage(pil_image)
+                    self._preview_label.config(image=self._current_preview_photo, text="")
+                    self._preview_label.image = self._current_preview_photo
+                    frame_processed = True
 
         except queue.Empty:
             pass
+        except Exception as e:
+            self.log_message(f"[预览错误] {e}")
 
+        # 无论是否处理帧，只要 _preview_active，就继续递归！
         if self._preview_active:
-            self.root.after(30, self._update_preview_display)  # 稍微降低频率
+            self.root.after(30, self._update_preview_display)
 
     def _close_preview(self):
         """关闭预览（嵌入模式，仅清空标签）"""
@@ -1004,7 +1002,10 @@ class VideoDetectionApp:
         self.frame_queue.put(None)
         # 预览队列放入结束标识
         if self._preview_active:
-            self._preview_queue.put_nowait((None, -1, []))
+            try:
+                self._preview_queue.put((None, -1, []), timeout=0.5)
+            except queue.Full:
+                self.log_message("[WARN] 预览队列满，无法发送视频结束信号")
 
     #进度更新：带暂停检查
     def _progress_updater(self, file_idx, total_files):
@@ -1043,69 +1044,51 @@ class VideoDetectionApp:
             for file_idx, file_path in enumerate(file_paths):
                 if self.stopped:
                     break
-
                 with self.progress_lock:
                     self._current_file_idx = file_idx
                     self.current_frame = 0
                     self.total_frames = 0
 
-                # 文件切换前清空预览队列，避免残留
-                if self._preview_active:
-                    while not self._preview_queue.empty():
-                        try:
-                            self._preview_queue.get_nowait()
-                        except queue.Empty:
-                            break
-                    self.log_message(f"切换到第 {file_idx+1}/{total_files} 个文件，预览已同步跟随")
-
+                self.log_message(f"切换到第 {file_idx+1}/{total_files} 个文件，预览已同步跟随")
                 self.roi_entered_boxes = []
                 prev_positions = {}
                 movement_buffer = {}
                 stable_since = {}
                 self.frame_queue = queue.Queue(maxsize=10)
-
                 cap_temp = cv2.VideoCapture(file_path)
                 orig_h = int(cap_temp.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 orig_w = int(cap_temp.get(cv2.CAP_PROP_FRAME_WIDTH))
                 cap_temp.release()
-
                 reader_thread = threading.Thread(
                     target=self.read_frames_producer,
                     args=(file_path, skip_frames),
                     daemon=True
                 )
                 reader_thread.start()
-
                 progress_thread = threading.Thread(
                     target=self._progress_updater,
                     args=(file_idx, total_files),
                     daemon=True
                 )
                 progress_thread.start()
-
                 batch_original_frames = []
                 batch_input_frames = []
                 batch_frame_counts = []
                 last_inference_time = time.time()
-
                 while True:
                     if self.stopped:
                         break
-
                     try:
                         item = self.frame_queue.get(timeout=2)
                         if item is None:
-                            # 单个文件帧读取完成，等待队列排空
                             time.sleep(0.1)
                             break
                     except queue.Empty:
                         continue
-
                     orig_frame, input_frame, frame_count = item
                     batch_original_frames.append(orig_frame)
                     batch_input_frames.append(input_frame)
                     batch_frame_counts.append(frame_count)
-
                     if len(batch_input_frames) >= self.BATCH_SIZE:
                         self._run_batch_inference_optimized(
                             batch_input_frames, batch_original_frames, batch_frame_counts,
@@ -1118,11 +1101,9 @@ class VideoDetectionApp:
                         if current_time > last_inference_time:
                             self.stats['fps'] = len(batch_frame_counts) / (current_time - last_inference_time)
                             last_inference_time = current_time
-
                         batch_original_frames.clear()
                         batch_input_frames.clear()
                         batch_frame_counts.clear()
-
                 if batch_input_frames:
                     self._run_batch_inference_optimized(
                         batch_input_frames, batch_original_frames, batch_frame_counts,
@@ -1131,26 +1112,12 @@ class VideoDetectionApp:
                         save_folder, file_path,
                         prev_positions, stable_since, movement_buffer
                     )
-
                 progress_thread.join(timeout=1)
                 reader_thread.join(timeout=2)
 
-                # 单个文件处理完成后，不关闭预览 
-                if self._preview_active and not self.stopped:
-                    # 显示临时提示，告知正在切换文件
-                    self.root.after(0, lambda: self._preview_label.config(
-                        text=f"第 {file_idx+1} 个文件处理完成，即将切换到下一个...",
-                        image=""
-                    ))
-
             if not self.stopped:
                 self.update_status("所有文件处理完成！")
-                # 所有文件处理完成后，清空预览并显示完成提示
-                if self._preview_active:
-                    self.root.after(0, lambda: self._preview_label.config(
-                        text="所有文件处理完成，预览结束",
-                        image=""
-                    ))
+
         except Exception as e:
             self.log_message(f"处理出错: {e}\n{traceback.format_exc()}")
             self.update_status(f"错误: {str(e)}")
@@ -1168,13 +1135,12 @@ class VideoDetectionApp:
                     self.update_status("所有文件处理完成！")
             self.root.after_idle(reset_ui)
 
-            # 所有任务结束后，不强制关闭预览，仅清空队列
+            # 所有任务结束后，清空预览队列（可保留）
             while not self._preview_queue.empty():
                 try:
                     self._preview_queue.get_nowait()
                 except:
                     break
-
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
     #---------------------------------------------------------
@@ -1312,6 +1278,7 @@ class VideoDetectionApp:
                             self._preview_queue.get_nowait()
                         # 现在队列中每个 item 是 (frame, frame_idx, annotate_info)
                         self._preview_queue.put_nowait((frame.copy(), frame_count, preview_annotate_info))
+                        self.log_message(f"[DEBUG] 入队预览帧 {frame_count}，当前文件索引: {self._current_file_idx}")
                     except queue.Full:
                         pass
 
