@@ -569,8 +569,8 @@ class VideoDetectionApp:
         self._resize_roi_display(800, 600)  # 初始窗口大小
 
         # 创建窗口
-        self._roi_window = ttk.Toplevel(title="选择关注区域 (ROI)")
-        self._roi_window.geometry("820x720")  # 宽+20, 高+120（含控件）
+        self._roi_window = ttk.Toplevel(title="选择关注区域 (ROI)       点完成【确认】设置关注区域，点【取消】或直接关闭窗口取消设置。")
+        self._roi_window.geometry("820x640")  # 宽+20, 高+40（含控件）
         self._roi_window.transient(self.root)
         self._roi_window.grab_set()
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "favicon.ico")
@@ -600,9 +600,9 @@ class VideoDetectionApp:
         # 按钮区域
         btn_frame = ttk.Frame(self._roi_window)
         btn_frame.grid(row=1, column=0, pady=5)
-        ttk.Label(self._roi_window, text="左键添加点，右键删除最后一点", foreground="gray").grid(row=2, column=0)
+        ttk.Label(self._roi_window, text="左键添加点，右键删除最后一点,点完成【确认】设置关注区域，点【取消】或直接关闭窗口取消设置。", foreground="gray").grid(row=2, column=0)
         
-        ttk.Button(btn_frame, text="完成", bootstyle=SUCCESS, command=self._finish_roi_selection).pack(side=LEFT, padx=5)
+        ttk.Button(btn_frame, text="确认", bootstyle=SUCCESS, command=self._finish_roi_selection).pack(side=LEFT, padx=5)
         ttk.Button(btn_frame, text="重置", bootstyle=WARNING, command=self._reset_roi_points).pack(side=LEFT, padx=5)
         ttk.Button(btn_frame, text="取消", bootstyle=SECONDARY, command=self._roi_window.destroy).pack(side=LEFT, padx=5)
 
@@ -1278,7 +1278,6 @@ class VideoDetectionApp:
                             self._preview_queue.get_nowait()
                         # 现在队列中每个 item 是 (frame, frame_idx, annotate_info)
                         self._preview_queue.put_nowait((frame.copy(), frame_count, preview_annotate_info))
-                        self.log_message(f"[DEBUG] 入队预览帧 {frame_count}，当前文件索引: {self._current_file_idx}")
                     except queue.Full:
                         pass
 
