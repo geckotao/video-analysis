@@ -1,3 +1,4 @@
+#main.py
 import tkinter as tk
 from tkinter import filedialog, IntVar, messagebox
 import cv2
@@ -130,14 +131,14 @@ class VideoDetectionApp:
         self._preview_queue = queue.Queue(maxsize=10)
         self._preview_annotate_queue = queue.Queue(maxsize=2)
         self._preview_active = False
-        self._preview_label = None  # 嵌入界面的预览标签（不再是窗口）
+        self._preview_label = None  # 嵌入界面的预览标签
         self._current_preview_photo = None  # 保留预览图像引用，防止被回收
         self.current_frame = 0
         self.total_frames = 0
         self._current_file_idx = -1
         self.progress_lock = threading.Lock()
         self.paused_display = False 
-
+        self.CHINESE_TO_ENGLISH = {v: k for k, v in COCO_CLASS_MAPPING.items()} #COCO_CLASS_MAPPING转回英文
 
         # 统计数据
         self.stats = {
@@ -271,7 +272,7 @@ class VideoDetectionApp:
                 raise FileNotFoundError(f"模型文件不存在: {self.MODEL_PATH}")
 
             self.model = YOLO(self.MODEL_PATH)
-            self.log_message("Ultralytics YOLO 模型加载成功！")
+            self.log_message(f"Ultralytics YOLO模型 [{self.MODEL_PATH}] 加载成功！")
             return True
         except Exception as e:
             self.log_message(f"加载模型失败: {str(e)}")
@@ -422,7 +423,7 @@ class VideoDetectionApp:
         stats_frame.pack(fill=X, pady=(10, 0))
         self.fps_label = ttk.Label(stats_frame, text="FPS(每秒处理帧数): 0.0")
         self.fps_label.pack(anchor=W)
-        self.targets_label = ttk.Label(stats_frame, text="目标截图总数: 0")
+        self.targets_label = ttk.Label(stats_frame, text="截图总数: 0")
         self.targets_label.pack(anchor=W)
         self.gpu_label = ttk.Label(stats_frame, text="占用 GPU 显存: N/A")
         self.gpu_label.pack(anchor=W)
@@ -548,7 +549,6 @@ class VideoDetectionApp:
             except Exception as e:
                 Messagebox.showwarning("权限警告", f"保存路径可能有问题: {e}")
 
-    #ROI---------------------------           
     #ROI 选择
     def select_roi(self):
         if not self.file_paths:
@@ -592,7 +592,7 @@ class VideoDetectionApp:
         # 初始化 ROI 点
         self._roi_points_scaled = []
 
-        # 绑定事件
+        # 绑定鼠标事件
         self._roi_canvas.bind("<Button-1>", self._on_roi_click)
         self._roi_canvas.bind("<Button-3>", self._on_roi_right_click)
         self._roi_window.bind("<Configure>", self._on_roi_window_resize)
@@ -622,7 +622,6 @@ class VideoDetectionApp:
         scale_w = canvas_w / w
         scale_h = canvas_h / h
         scale = min(scale_w, scale_h)
-
         new_w = int(w * scale)
         new_h = int(h * scale)
 
@@ -769,7 +768,7 @@ class VideoDetectionApp:
         self.roi_button.config(text="选取关注区域", command=self.select_roi)
         self.log_message("已取消关注区域")
 
-    #ROI-------------
+    #ROI end
 
     # 同步预览实现 
     def toggle_preview(self):
@@ -829,7 +828,8 @@ class VideoDetectionApp:
                     for (x1, y1, x2, y2, class_display, score) in annotate_info:
                         color = COLORS[hash(class_display) % len(COLORS)]
                         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                        text = f"{class_display} {score:.2f}"
+                        class_en = self.CHINESE_TO_ENGLISH.get(class_display, class_display) #获取英文类别名用于预览标注
+                        text = f"{class_en} {score:.2f}"
                         text_size, _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
                         text_x = x1
                         text_y = y1 - 10 if y1 - 10 > 0 else y1 + text_size[1] + 10
@@ -966,41 +966,32 @@ class VideoDetectionApp:
         cap = cv2.VideoCapture(video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         frame_idx = 0
-
         with self.progress_lock:
             self.total_frames = total_frames
-
         while cap.isOpened() and not self.stopped:
             while self.paused:
                 time.sleep(0.01)
-                if self.stopped:
-                    break
             if self.stopped:
                 break
-
             ret = cap.grab()
             if not ret:
                 break
-
             if frame_idx % skip_frames == 0:
                 ret, frame = cap.retrieve()
                 if not ret:
                     break
-
                 with self.progress_lock:
                     self.current_frame = frame_idx
 
-                resized_frame = cv2.resize(frame, (self.INFERENCE_SIZE, self.INFERENCE_SIZE))
+                # 直接传原始帧（Ultralytics 会自动 letterbox）
                 try:
-                    self.frame_queue.put((frame.copy(), resized_frame, frame_idx), timeout=1.0)
+                    # 两个都是原始帧：第一个用于截图/预览，第二个用于模型推理
+                    self.frame_queue.put((frame.copy(), frame.copy(), frame_idx), timeout=1.0)
                 except queue.Full:
                     time.sleep(0.01)
-
             frame_idx += 1
-
         cap.release()
         self.frame_queue.put(None)
-        # 预览队列放入结束标识
         if self._preview_active:
             try:
                 self._preview_queue.put((None, -1, []), timeout=0.5)
@@ -1150,10 +1141,11 @@ class VideoDetectionApp:
                                     save_folder, file_path,
                                     prev_positions, stable_since, movement_buffer):
         try:
+            #直接传原始帧列表给 model()（Ultralytics 会自动 letterbox + 还原坐标）
             if CUDA_STREAM is not None:
                 with torch.cuda.stream(CUDA_STREAM):
                     results_list = self.model(
-                        batch_input_frames,
+                        batch_input_frames,  # ← 原始帧列表
                         conf=confidence_threshold,
                         iou=self.NMS_IOU_THRESHOLD,
                         verbose=False
@@ -1171,7 +1163,6 @@ class VideoDetectionApp:
                 frame = batch_original_frames[idx]
                 frame_count = batch_frame_counts[idx]
                 if not (results and len(results.boxes) > 0):
-                    # 即使无检测，也推送空标注帧
                     if self._preview_active:
                         try:
                             if self._preview_queue.full():
@@ -1181,24 +1172,15 @@ class VideoDetectionApp:
                             pass
                     continue
 
-                # 提取原始检测结果
-                boxes = results.boxes.xyxy.cpu().numpy()
+                # Ultralytics 自动将 boxes 还原到原始视频分辨率！
+                boxes = results.boxes.xyxy.cpu().numpy()  # shape: (N, 4) in [orig_w, orig_h] coordinate
                 scores = results.boxes.conf.cpu().numpy()
                 class_ids = results.boxes.cls.cpu().numpy().astype(int)
 
-                # 缩放回原始尺寸
-                scale_x = orig_w / self.INFERENCE_SIZE
-                scale_y = orig_h / self.INFERENCE_SIZE
-                boxes_original = boxes.copy()
-                boxes_original[:, [0, 2]] *= scale_x
-                boxes_original[:, [1, 3]] *= scale_y
-                boxes_original = np.clip(boxes_original, 0, [orig_w, orig_h, orig_w, orig_h])
-
-                # 过滤未勾选类别
                 filtered_boxes = []
                 filtered_scores = []
                 filtered_class_ids = []
-                for box, score, cls_id in zip(boxes_original, scores, class_ids):
+                for box, score, cls_id in zip(boxes, scores, class_ids):
                     if cls_id >= len(COCO_CLASSES):
                         continue
                     class_name = COCO_CLASSES[cls_id]
@@ -1207,6 +1189,7 @@ class VideoDetectionApp:
                     filtered_boxes.append(box)
                     filtered_scores.append(score)
                     filtered_class_ids.append(cls_id)
+
                 if not filtered_boxes:
                     if self._preview_active:
                         try:
@@ -1217,7 +1200,7 @@ class VideoDetectionApp:
                             pass
                     continue
 
-                #跨类别高 IoU 去重 
+                # 跨类别高 IoU 去重（去重逻辑）
                 detections = [(filtered_scores[i], filtered_boxes[i], filtered_class_ids[i]) for i in range(len(filtered_scores))]
                 detections.sort(key=lambda x: x[0], reverse=True)
                 to_keep = [True] * len(detections)
@@ -1245,7 +1228,6 @@ class VideoDetectionApp:
                             iou = inter_area / union_area if union_area > 0 else 0.0
                             if iou > 0.85:
                                 to_keep[j] = False
-
                 kept_detections = [detections[i] for i in range(len(detections)) if to_keep[i]]
                 if not kept_detections:
                     if self._preview_active:
@@ -1256,12 +1238,13 @@ class VideoDetectionApp:
                         except queue.Full:
                             pass
                     continue
+
                 kept_scores, kept_boxes, kept_class_ids = zip(*kept_detections)
                 kept_scores = np.array(kept_scores)
                 kept_boxes = np.array(kept_boxes)
                 kept_class_ids = np.array(kept_class_ids)
 
-                # 构造预览标注信息（仅 ROI 内目标）
+                # 构造预览标注（ROI 检查使用原始坐标）
                 preview_annotate_info = []
                 for box, score, cls_id in zip(kept_boxes, kept_scores, kept_class_ids):
                     x1, y1, x2, y2 = box.astype(int)
@@ -1269,31 +1252,26 @@ class VideoDetectionApp:
                         continue
                     class_name = COCO_CLASSES[cls_id]
                     class_display = COCO_CLASS_MAPPING.get(class_name, class_name)
-                    preview_annotate_info.append((x1, y1, x2, y2, class_name, float(score)))
-
-                # 将帧 + 标注 一次性入队（不再分离）
+                    preview_annotate_info.append((x1, y1, x2, y2, class_display, float(score)))
                 if self._preview_active:
                     try:
                         if self._preview_queue.full():
                             self._preview_queue.get_nowait()
-                        # 现在队列中每个 item 是 (frame, frame_idx, annotate_info)
                         self._preview_queue.put_nowait((frame.copy(), frame_count, preview_annotate_info))
                     except queue.Full:
                         pass
 
-                # 截图逻辑 
+                # 截图逻辑（原始坐标）
                 for box, score, cls_id in zip(kept_boxes, kept_scores, kept_class_ids):
                     x1, y1, x2, y2 = box.astype(int)
                     current_box = (x1, y1, x2, y2)
                     if not self._is_point_in_roi((x1 + x2) / 2.0, (y1 + y2) / 2.0):
                         continue
-
                     is_first_appearance = True
                     for recorded_box, recorded_cls in self.roi_entered_boxes:
                         if recorded_cls == cls_id and self._box_iou_simple(current_box, recorded_box) > self.ROI_IOU_THRESHOLD:
                             is_first_appearance = False
                             break
-
                     should_process = False
                     if only_moving:
                         if is_first_appearance:
@@ -1306,25 +1284,20 @@ class VideoDetectionApp:
                             prev_positions[obj_key] = current_box
                     else:
                         should_process = True
-
                     if not should_process:
                         continue
-
                     if is_first_appearance:
                         self.roi_entered_boxes.append((current_box, cls_id))
-
                     class_name = COCO_CLASSES[cls_id]
                     class_display = COCO_CLASS_MAPPING.get(class_name, class_name)
                     self.stats['total_targets'] += 1
                     self.stats['targets_by_class'][class_display] = self.stats['targets_by_class'].get(class_display, 0) + 1
-
                     annotate_frame = frame.copy() if annotate_objects else frame
                     if annotate_objects:
                         color = COLORS[hash(class_name) % len(COLORS)]
                         cv2.rectangle(annotate_frame, (x1, y1), (x2, y2), color, 2)
                         cv2.putText(annotate_frame, f"{class_name} {score:.2f}",
                                     (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
-
                     safe_base = sanitize_filename(os.path.splitext(os.path.basename(file_path))[0])
                     safe_class = sanitize_filename(class_display)
                     save_path = os.path.join(save_folder, f"{safe_base}_frame{frame_count}_{safe_class}.jpg")
@@ -1335,7 +1308,6 @@ class VideoDetectionApp:
             self.log_message(f"批量推理出错: {e}")
             import traceback
             self.log_message(traceback.format_exc())
-
     #---------------------------------------------------------
     def start_processing(self):
         if not self.file_paths:
@@ -1431,7 +1403,7 @@ class VideoDetectionApp:
         """定期更新统计面板"""
         if self._ui_ready:
             self.fps_label.config(text=f"FPS(每秒处理帧数): {self.stats['fps']:.1f}")
-            self.targets_label.config(text=f"目标截图总数: {self.stats['total_targets']}")
+            self.targets_label.config(text=f"截图总数: {self.stats['total_targets']}")
             if self.gpu_handle is not None:
                 try:
                     mem_info = pynvml.nvmlDeviceGetMemoryInfo(self.gpu_handle)
