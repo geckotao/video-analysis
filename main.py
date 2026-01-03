@@ -17,7 +17,7 @@ import re
 # 导入ttkbootstrap核心组件
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
-from ttkbootstrap.widgets.scrolled import ScrolledFrame, ScrolledText
+from ttkbootstrap.widgets.scrolled import ScrolledFrame
 
 # 尝试导入 pynvml 用于 GPU 监控
 try:
@@ -506,7 +506,7 @@ class VideoDetectionApp:
             except Exception as e:
                 messagebox.showwarning("权限警告", f"保存路径可能有问题: {e}")
 
-    # ROI 选择（省略，与原文件一致）
+    # ROI 选择
     def select_roi(self):
         if not self.file_paths:
             self.log_message("错误: 请先选择视频文件")
