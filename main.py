@@ -1,4 +1,4 @@
-#main.py
+# main.py
 import tkinter as tk
 from tkinter import filedialog, IntVar, messagebox
 import cv2
@@ -18,7 +18,6 @@ import re
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 from ttkbootstrap.widgets.scrolled import ScrolledFrame, ScrolledText
-from ttkbootstrap.dialogs import Messagebox
 
 # 尝试导入 pynvml 用于 GPU 监控
 try:
@@ -50,10 +49,10 @@ def setup_exception_logging():
         messagebox.showerror("程序崩溃", f"程序启动失败，详细日志已保存到:\n{log_path}\n请检查日志或联系开发者。")
         sys.exit(1)
     sys.excepthook = handle_exception
+
 setup_exception_logging()
 
-
-# 类别与颜色 
+# 类别与颜色
 COCO_CLASS_MAPPING = {
     'person': '人', 'bicycle': '自行车', 'car': '小车', 'motorcycle': '摩托车',
     'airplane': '飞机', 'bus': '客车', 'train': '火车', 'truck': '货车', 'boat': '船',
@@ -83,7 +82,7 @@ COLORS = [
 ]
 NMS_IOU_THRESHOLD_DEFAULT = 0.45
 
-# 导入Ultralytics、PyTorch依赖 
+# 导入Ultralytics、PyTorch依赖
 try:
     import torch
     from ultralytics import YOLO
@@ -98,7 +97,7 @@ try:
 except ImportError:
     ULTRALYTICS_AVAILABLE = False
     CUDA_STREAM = None
-    Messagebox.showerror("依赖缺失", "缺少 Ultralytics 或 PyTorch！请安装：pip install ultralytics torch")
+    messagebox.showerror("依赖缺失", "缺少 Ultralytics 或 PyTorch！请安装：pip install ultralytics torch")
 
 class VideoDetectionApp:
     def __init__(self, root: ttk.Window):
@@ -106,13 +105,13 @@ class VideoDetectionApp:
         self.root.title("视频目标检测截图工具 by geckotao")
         self.root.geometry("1200x800")
         self.root.resizable(True, True)
-
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "favicon.ico")
         if os.path.exists(icon_path):
             try:
                 self.root.iconbitmap(icon_path)
             except Exception as e:
                 print(f"[WARN] 无法加载图标: {e}")
+
         self._log_buffer = []
         self._ui_ready = False
         self.log_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "app_runtime.log")
@@ -125,8 +124,7 @@ class VideoDetectionApp:
         self.class_names = {i: name for i, name in enumerate(COCO_CLASSES)}
         self.class_vars = []
         self.current_processing_status = ""
-
-        # 同步预览相关变量 
+        # 同步预览相关变量
         self._preview_window = None
         self._preview_queue = queue.Queue(maxsize=10)
         self._preview_annotate_queue = queue.Queue(maxsize=2)
@@ -137,9 +135,8 @@ class VideoDetectionApp:
         self.total_frames = 0
         self._current_file_idx = -1
         self.progress_lock = threading.Lock()
-        self.paused_display = False 
+        self.paused_display = False
         self.CHINESE_TO_ENGLISH = {v: k for k, v in COCO_CLASS_MAPPING.items()} #COCO_CLASS_MAPPING转回英文
-
         # 统计数据
         self.stats = {
             'fps': 0.0,
@@ -147,12 +144,10 @@ class VideoDetectionApp:
             'targets_by_class': {},
             'gpu_mem': 'N/A'
         }
-
         # 多线程保存队列
         self.save_queue = queue.Queue(maxsize=100)
         self.save_thread = threading.Thread(target=self._save_worker, daemon=True)
         self.save_thread.start()
-
         # 初始化 pynvml
         if PYNVML_AVAILABLE and torch.cuda.is_available():
             try:
@@ -205,78 +200,67 @@ class VideoDetectionApp:
                     config.write(f)
                 self.log_message(f"已创建默认配置文件 {config_path}")
             except Exception as e:
-                Messagebox.showerror("错误", f"无法创建配置文件: {e}")
+                messagebox.showerror("错误", f"无法创建配置文件: {e}")
                 return False
         else:
             config.read(config_path, encoding='utf-8')
+            self.MODEL_PATH = config.get('Settings', 'model_path', fallback='./models/yolo11x.pt')
+            try:
+                self.NMS_IOU_THRESHOLD = float(config.get('Settings', 'nms_iou_threshold', fallback=str(NMS_IOU_THRESHOLD_DEFAULT)))
+                self.NMS_IOU_THRESHOLD = max(0.0, min(1.0, self.NMS_IOU_THRESHOLD))
+            except ValueError:
+                self.NMS_IOU_THRESHOLD = NMS_IOU_THRESHOLD_DEFAULT
+            try:
+                self.INFERENCE_SIZE = int(config.get('Settings', 'inference_size', fallback='640'))
+                self.INFERENCE_SIZE = max(320, min(1280, self.INFERENCE_SIZE))
+            except ValueError:
+                self.INFERENCE_SIZE = 640
+            try:
+                self.BATCH_SIZE = int(config.get('Settings', 'batch_size', fallback='8'))
+                self.BATCH_SIZE = max(1, self.BATCH_SIZE)
+            except ValueError:
+                self.BATCH_SIZE = 8
+            try:
+                self.ROI_IOU_THRESHOLD = float(config.get('Settings', 'roi_iou_threshold', fallback='0.2'))
+            except ValueError:
+                self.ROI_IOU_THRESHOLD = 0.2
+            try:
+                self.MOVEMENT_IOU_THRESHOLD = float(config.get('Settings', 'movement_iou_threshold', fallback='0.6'))
+            except ValueError:
+                self.MOVEMENT_IOU_THRESHOLD = 0.6
+            try:
+                self.MOVEMENT_RELATIVE_THRESHOLD = float(config.get('Settings', 'movement_relative_threshold', fallback='0.02'))
+            except ValueError:
+                self.MOVEMENT_RELATIVE_THRESHOLD = 0.02
+            try:
+                self.MOVEMENT_CONSECUTIVE_FRAMES = int(config.get('Settings', 'movement_consecutive_frames', fallback='5'))
+            except ValueError:
+                self.MOVEMENT_CONSECUTIVE_FRAMES = 5
+            try:
+                self.MOVEMENT_STABLE_SECONDS = float(config.get('Settings', 'movement_stable_seconds', fallback='5'))
+            except ValueError:
+                self.MOVEMENT_STABLE_SECONDS = 5
 
-        self.MODEL_PATH = config.get('Settings', 'model_path', fallback='./models/yolo11x.pt')
-
-        try:
-            self.NMS_IOU_THRESHOLD = float(config.get('Settings', 'nms_iou_threshold', fallback=str(NMS_IOU_THRESHOLD_DEFAULT)))
-            self.NMS_IOU_THRESHOLD = max(0.0, min(1.0, self.NMS_IOU_THRESHOLD))
-        except ValueError:
-            self.NMS_IOU_THRESHOLD = NMS_IOU_THRESHOLD_DEFAULT
-
-        try:
-            self.INFERENCE_SIZE = int(config.get('Settings', 'inference_size', fallback='640'))
-            self.INFERENCE_SIZE = max(320, min(1280, self.INFERENCE_SIZE))
-        except ValueError:
-            self.INFERENCE_SIZE = 640
-
-        try:
-            self.BATCH_SIZE = int(config.get('Settings', 'batch_size', fallback='8'))
-            self.BATCH_SIZE = max(1, self.BATCH_SIZE)
-        except ValueError:
-            self.BATCH_SIZE = 8
-
-        try:
-            self.ROI_IOU_THRESHOLD = float(config.get('Settings', 'roi_iou_threshold', fallback='0.2'))
-        except ValueError:
-            self.ROI_IOU_THRESHOLD = 0.2
-
-        try:
-            self.MOVEMENT_IOU_THRESHOLD = float(config.get('Settings', 'movement_iou_threshold', fallback='0.6'))
-        except ValueError:
-            self.MOVEMENT_IOU_THRESHOLD = 0.6
-
-        try:
-            self.MOVEMENT_RELATIVE_THRESHOLD = float(config.get('Settings', 'movement_relative_threshold', fallback='0.02'))
-        except ValueError:
-            self.MOVEMENT_RELATIVE_THRESHOLD = 0.02
-
-        try:
-            self.MOVEMENT_CONSECUTIVE_FRAMES = int(config.get('Settings', 'movement_consecutive_frames', fallback='5'))
-        except ValueError:
-            self.MOVEMENT_CONSECUTIVE_FRAMES = 5
-
-        try:
-            self.MOVEMENT_STABLE_SECONDS = float(config.get('Settings', 'movement_stable_seconds', fallback='5'))
-        except ValueError:
-            self.MOVEMENT_STABLE_SECONDS = 5
-
-        self.log_message(
-            f"配置加载成功: NMS IoU={self.NMS_IOU_THRESHOLD}, "
-            f"推理分辨率={self.INFERENCE_SIZE}, batch_size={self.BATCH_SIZE}, "
-            f"ROI IoU={self.ROI_IOU_THRESHOLD}"
-        )
+            self.log_message(
+                f"配置加载成功: NMS IoU={self.NMS_IOU_THRESHOLD}, "
+                f"推理分辨率={self.INFERENCE_SIZE}, batch_size={self.BATCH_SIZE}, "
+                f"ROI IoU={self.ROI_IOU_THRESHOLD}"
+            )
         return True
 
     def load_model(self):
         if not ULTRALYTICS_AVAILABLE:
-            Messagebox.showerror("错误", "Ultralytics 未安装！")
+            messagebox.showerror("错误", "Ultralytics 未安装！")
             return False
-
         try:
             if not os.path.exists(self.MODEL_PATH):
                 raise FileNotFoundError(f"模型文件不存在: {self.MODEL_PATH}")
-
             self.model = YOLO(self.MODEL_PATH)
             self.log_message(f"Ultralytics YOLO模型 [{self.MODEL_PATH}] 加载成功！")
             return True
         except Exception as e:
             self.log_message(f"加载模型失败: {str(e)}")
-            Messagebox.showerror("错误", f"模型加载失败:\n{str(e)}\n请确保模型由 Ultralytics 生成。")
+            messagebox.showerror("错误", f"模型加载失败:\n{str(e)}\n请确保模型由 Ultralytics 生成。")
             return False
 
     def _auto_adjust_batch_size(self):
@@ -284,14 +268,12 @@ class VideoDetectionApp:
             self.log_message("未检测到 CUDA，使用 CPU 推理，batch_size 强制设为 1")
             self.BATCH_SIZE = 1
             return
-
         try:
             total_vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
         except Exception as e:
             self.log_message(f"获取 GPU 显存失败: {e}，默认设 batch_size=1")
             self.BATCH_SIZE = 1
             return
-
         model_name = os.path.basename(self.MODEL_PATH).lower()
         if 'yolo11n' in model_name:
             base_vram = 0.9
@@ -311,17 +293,14 @@ class VideoDetectionApp:
         else:
             base_vram = 2.9
             model_type = "Unknown"
-
         safe_vram_limit = total_vram_gb * 0.85
         if safe_vram_limit <= base_vram:
             max_batch = 1
         else:
             max_batch = 1 + int((safe_vram_limit - base_vram) / 0.03)
             max_batch = max(1, max_batch)
-
         original_batch = self.BATCH_SIZE
         self.BATCH_SIZE = min(original_batch, max_batch)
-
         self.log_message(
             f"GPU 显存: {total_vram_gb:.1f} GB | 模型: {model_type} | "
             f"inference_size: {self.INFERENCE_SIZE} → "
@@ -332,16 +311,13 @@ class VideoDetectionApp:
         # 主框架
         main_frame = ttk.Frame(self.root, padding=10)
         main_frame.pack(fill=BOTH, expand=True)
-
         # 左侧选项设置框架
         left_frame = ttk.Labelframe(main_frame, text="选项设置", padding=10)
         left_frame.pack(side=LEFT, fill=Y, padx=(0, 10))
-
         # 视频文件选择
         self.video_entry = self._create_labeled_entry(left_frame, "选择视频文件:", "浏览", self.select_video)
         # 保存路径选择
         self.save_path_entry = self._create_labeled_entry(left_frame, "截图保存路径:", "浏览", self.select_save_path)
-
         # 目标类别选择框架（使用滚动框架）
         classes_frame = ttk.Labelframe(left_frame, text="选择目标类别", padding=10)
         classes_frame.pack(fill=BOTH, expand=True, pady=(0, 10))
@@ -356,7 +332,6 @@ class VideoDetectionApp:
         # 类别复选框容器
         checkbox_container = ttk.Frame(scrollable_frame)
         checkbox_container.pack(fill=BOTH, expand=True)
-
         # 初始化类别复选框
         self.class_vars = []
         default_selected = {'bicycle', 'car', 'motorcycle', 'bus', 'truck'}
@@ -367,32 +342,27 @@ class VideoDetectionApp:
             cb = ttk.Checkbutton(checkbox_container, text=display, variable=var)
             cb.grid(row=row, column=col, sticky=W, padx=2, pady=1)
             self.class_vars.append(var)
-
         # 处理选项框架
         options_frame = ttk.Labelframe(left_frame, text="处理选项", padding=10)
         options_frame.pack(fill=X, pady=(0, 10))
-
         # 跳帧数设置
         ttk.Label(options_frame, text="跳帧数:", width=18).grid(row=0, column=0, sticky=W)
         self.speed_entry = ttk.Entry(options_frame)
         self.speed_entry.insert(0, "23")
         self.speed_entry.grid(row=0, column=1, sticky=EW, padx=5)
         ttk.Label(options_frame, text="(1=逐帧, 值越大越快)", foreground="gray").grid(row=0, column=2)
-
         # 置信度阈值设置
         ttk.Label(options_frame, text="置信度阈值:", width=18).grid(row=1, column=0, sticky=W)
         self.confidence_entry = ttk.Entry(options_frame)
         self.confidence_entry.insert(0, "0.1")
         self.confidence_entry.grid(row=1, column=1, sticky=EW, padx=5)
         ttk.Label(options_frame, text="(0.0-1.0)", foreground="gray").grid(row=1, column=2)
-
         # 只对移动目标截图
         self.only_moving_var = IntVar(value=1)
         ttk.Checkbutton(options_frame, text="只对移动目标截图", variable=self.only_moving_var).grid(row=2, column=0, sticky=W, padx=(0, 20))
         # 在截图中标注目标
         self.annotate_var = IntVar(value=0)
         ttk.Checkbutton(options_frame, text="在截图中标注目标", variable=self.annotate_var).grid(row=2, column=1, sticky=W)
-
         # ROI选择框架
         roi_frame = ttk.Frame(options_frame)
         roi_frame.grid(row=4, column=0, sticky=EW, pady=5, padx=(0, 10))  # 同一行row=4，第0列，右侧留间距
@@ -400,7 +370,6 @@ class VideoDetectionApp:
         self.roi_button.pack(side=LEFT)
         self.roi_label = ttk.Label(roi_frame, text="未选取关注区域", foreground="gray")
         self.roi_label.pack(side=LEFT, padx=5)
-
         # 预览框架（同一行号，分配第1列，取消跨列）
         preview_frame = ttk.Frame(options_frame)
         preview_frame.grid(row=4, column=1, sticky=EW, pady=5)  # 同一行row=4，第1列
@@ -417,7 +386,6 @@ class VideoDetectionApp:
         self.pause_button.pack(side=LEFT, padx=5)
         self.stop_button = ttk.Button(control_button_frame, text="停止处理", command=self.stop_processing, state=DISABLED, bootstyle=DANGER)
         self.stop_button.pack(side=LEFT, padx=5)
-
         # 实时统计框架
         stats_frame = ttk.Labelframe(left_frame, text="实时统计", padding=10)
         stats_frame.pack(fill=X, pady=(10, 0))
@@ -427,33 +395,26 @@ class VideoDetectionApp:
         self.targets_label.pack(anchor=W)
         self.gpu_label = ttk.Label(stats_frame, text="占用 GPU 显存: N/A")
         self.gpu_label.pack(anchor=W)
-
         # 右侧处理状态框架
         right_frame = ttk.Labelframe(main_frame, text="处理状态", padding=10)
         right_frame.pack(side=RIGHT, fill=BOTH, expand=True)
-
         # 状态标签
         self.status_label = ttk.Label(right_frame, text="等待开始......")
         self.status_label.pack(fill=X, pady=10)
-
         # 进度条
         self.progress_var = tk.DoubleVar()
         ttk.Progressbar(right_frame, variable=self.progress_var).pack(fill=X, pady=5)
-
-        # 日志框架 
+        # 日志框架
         log_frame = ttk.Labelframe(right_frame, text="处理日志", padding=10)
-        log_frame.pack(fill=X, pady=(10, 5)) 
+        log_frame.pack(fill=X, pady=(10, 5))
         # 1. 创建滚动条
         log_scrollbar = ttk.Scrollbar(log_frame, orient=VERTICAL)
         log_scrollbar.pack(side=RIGHT, fill=Y)
-
         # 2. 创建原生Text组件（支持state属性）
-        self.log_text = tk.Text(log_frame,wrap=WORD,state=tk.DISABLED,height=8,yscrollcommand=log_scrollbar.set )
+        self.log_text = tk.Text(log_frame, wrap=WORD, state=tk.DISABLED, height=8, yscrollcommand=log_scrollbar.set)
         self.log_text.pack(fill=BOTH, expand=True)
-
         # 3. 绑定滚动条与文本框
         log_scrollbar.config(command=self.log_text.yview)
-
         #预览框架
         preview_frame = ttk.Labelframe(right_frame, text="实时预览", padding=5)
         # 填充水平空间，垂直按需扩展，占据日志框下方区域
@@ -461,8 +422,6 @@ class VideoDetectionApp:
         # 预览标签（用于显示视频帧），设置居中对齐
         self._preview_label = ttk.Label(preview_frame, anchor="center")
         self._preview_label.pack(fill=BOTH, expand=True)  # 填充预览框架空间
-
-
         self._ui_ready = True
         for msg in self._log_buffer:
             self.root.after_idle(lambda m=msg: self._safe_log(m))
@@ -480,14 +439,12 @@ class VideoDetectionApp:
     def log_message(self, message: str):
         # 1. 输出到控制台
         print(f"[LOG] {message}")
-        
         # 2. 写入运行时日志文件
         try:
             with open(self.log_file_path, "a", encoding="utf-8") as f:
                 f.write(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}\n")
         except Exception as e:
             print(f"[WARN] 写入日志文件失败: {e}")
-        
         # 3. 输出到UI文本框
         if self._ui_ready:
             self.root.after(0, lambda msg=message: self._safe_log(msg))
@@ -547,30 +504,24 @@ class VideoDetectionApp:
                 os.remove(test)
                 self.log_message("路径验证: 具有写入权限，支持中文路径")
             except Exception as e:
-                Messagebox.showwarning("权限警告", f"保存路径可能有问题: {e}")
+                messagebox.showwarning("权限警告", f"保存路径可能有问题: {e}")
 
-    #ROI 选择
+    # ROI 选择（省略，与原文件一致）
     def select_roi(self):
         if not self.file_paths:
             self.log_message("错误: 请先选择视频文件")
             return
-
         cap = cv2.VideoCapture(self.file_paths[0])
         ret, frame = cap.read()
         cap.release()
         if not ret:
             self.log_message("错误: 无法读取视频首帧")
             return
-
         self._roi_frame_orig = frame.copy()
         self._roi_orig_h, self._roi_orig_w = frame.shape[:2]
-
-        # 初始化缩放后的图像（先按原始比例缩放到合适大小）
-        self._resize_roi_display(800, 600)  # 初始窗口大小
-
-        # 创建窗口
+        self._resize_roi_display(800, 600)
         self._roi_window = ttk.Toplevel(title="选择关注区域 (ROI)       点完成【确认】设置关注区域，点【取消】或直接关闭窗口取消设置。")
-        self._roi_window.geometry("820x640")  # 宽+20, 高+40（含控件）
+        self._roi_window.geometry("820x640")
         self._roi_window.transient(self.root)
         self._roi_window.grab_set()
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "favicon.ico")
@@ -579,99 +530,64 @@ class VideoDetectionApp:
                 self._roi_window.iconbitmap(icon_path)
             except Exception as e:
                 self.log_message(f"[WARN] ROI窗口图标加载失败: {e}")
-        # Canvas 布局：可伸缩
         self._roi_canvas = ttk.Canvas(self._roi_window, bg="black")
         self._roi_canvas.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
         self._roi_window.grid_rowconfigure(0, weight=1)
         self._roi_window.grid_columnconfigure(0, weight=1)
-
-        # 显示初始图像
         self._roi_photo = ImageTk.PhotoImage(Image.fromarray(self._roi_display_rgb))
         self._canvas_img_id = self._roi_canvas.create_image(0, 0, anchor=NW, image=self._roi_photo)
-
-        # 初始化 ROI 点
         self._roi_points_scaled = []
-
-        # 绑定鼠标事件
         self._roi_canvas.bind("<Button-1>", self._on_roi_click)
         self._roi_canvas.bind("<Button-3>", self._on_roi_right_click)
         self._roi_window.bind("<Configure>", self._on_roi_window_resize)
-
-        # 按钮区域
         btn_frame = ttk.Frame(self._roi_window)
         btn_frame.grid(row=1, column=0, pady=5)
         ttk.Label(self._roi_window, text="左键添加点，右键删除最后一点,点完成【确认】设置关注区域，点【取消】或直接关闭窗口取消设置。", foreground="gray").grid(row=2, column=0)
-        
         ttk.Button(btn_frame, text="确认", bootstyle=SUCCESS, command=self._finish_roi_selection).pack(side=LEFT, padx=5)
         ttk.Button(btn_frame, text="重置", bootstyle=WARNING, command=self._reset_roi_points).pack(side=LEFT, padx=5)
         ttk.Button(btn_frame, text="取消", bootstyle=SECONDARY, command=self._roi_window.destroy).pack(side=LEFT, padx=5)
-
         self.log_message("请在弹出窗口中绘制关注区域（至少3个点）")
 
-
-    #ROI选择窗口核心缩放逻辑
     def _resize_roi_display(self, canvas_w, canvas_h):
-        """根据 Canvas 尺寸，等比缩放原始帧"""
         if not hasattr(self, '_roi_frame_orig'):
             return
-
         frame = self._roi_frame_orig
         h, w = self._roi_orig_h, self._roi_orig_w
-
-        # 计算缩放比例（保持宽高比）
         scale_w = canvas_w / w
         scale_h = canvas_h / h
         scale = min(scale_w, scale_h)
         new_w = int(w * scale)
         new_h = int(h * scale)
-
-        # 缩放图像
         resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
         self._roi_display_rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-        self._roi_current_scale = scale  # 用于坐标映射
+        self._roi_current_scale = scale
         self._roi_canvas_w = new_w
         self._roi_canvas_h = new_h
         self._roi_canvas_offset_x = (canvas_w - new_w) // 2
         self._roi_canvas_offset_y = (canvas_h - new_h) // 2
 
-    #窗口调整事件处理
     def _on_roi_window_resize(self, event):
-        # 忽略按钮区域 resize（只响应 Canvas 区域变化）
         if event.widget != self._roi_window:
             return
-        # 延迟处理，避免频繁触发
         if hasattr(self, '_roi_resize_after_id'):
             self._roi_window.after_cancel(self._roi_resize_after_id)
-        self._roi_resize_after_id = self._roi_window.after(100, self._perform_roi_resize, event.width, event.height - 100)  # 扣除按钮高度
+        self._roi_resize_after_id = self._roi_window.after(100, self._perform_roi_resize, event.width, event.height - 100)
 
     def _perform_roi_resize(self, win_w, win_h):
         if win_w <= 1 or win_h <= 1:
             return
-        # 重新缩放图像
         self._resize_roi_display(win_w, win_h)
-        # 更新 Canvas 显示
         self._roi_photo = ImageTk.PhotoImage(Image.fromarray(self._roi_display_rgb))
         self._roi_canvas.itemconfig(self._canvas_img_id, image=self._roi_photo)
         self._roi_canvas.config(width=win_w, height=win_h)
-        # 移动图像到居中位置
         self._roi_canvas.coords(self._canvas_img_id, self._roi_canvas_offset_x, self._roi_canvas_offset_y)
-        # 重绘 ROI 点（需重新计算位置）
         self._redraw_roi()
-
-    #辅助方法：鼠标交互
-    def cancel_roi(self):
-        self.roi = None
-        self.roi_label.config(text="关注区域未设置", foreground="gray")
-        self.roi_button.config(text="选取关注区域", command=self.select_roi)
-        self.log_message("已取消关注区域")
 
     def _on_roi_click(self, event):
         offset_x = getattr(self, '_roi_canvas_offset_x', 0)
         offset_y = getattr(self, '_roi_canvas_offset_y', 0)
-        # 转换为图像坐标系（扣除居中偏移）
         img_x = event.x - offset_x
         img_y = event.y - offset_y
-        # 检查是否在图像范围内
         if 0 <= img_x < self._roi_canvas_w and 0 <= img_y < self._roi_canvas_h:
             self._roi_points_scaled.append((img_x, img_y))
             self._redraw_roi()
@@ -685,19 +601,14 @@ class VideoDetectionApp:
         self._roi_canvas.delete("roi_line", "roi_point")
         if not hasattr(self, '_roi_points_scaled') or not self._roi_points_scaled:
             return
-
         offset_x = getattr(self, '_roi_canvas_offset_x', 0)
         offset_y = getattr(self, '_roi_canvas_offset_y', 0)
-
-        # 重绘点
         for x, y in self._roi_points_scaled:
             self._roi_canvas.create_oval(
                 x + offset_x - 3, y + offset_y - 3,
                 x + offset_x + 3, y + offset_y + 3,
                 fill="red", tags="roi_point"
             )
-
-        # 重绘连线
         n = len(self._roi_points_scaled)
         if n > 1:
             for i in range(n - 1):
@@ -717,47 +628,35 @@ class VideoDetectionApp:
                 fill="lime", width=2, dash=(4, 2), tags="roi_line"
             )
 
-    #完成 ROI 选择
     def _finish_roi_selection(self):
         if len(self._roi_points_scaled) < 3:
-            Messagebox.showwarning("ROI 无效", "请至少选择 3 个点")
+            messagebox.showwarning("ROI 无效", "请至少选择 3 个点")
             return
-
-        # 从显示坐标 → 原始视频坐标
         roi_points_orig = []
         scale = self._roi_current_scale
         for x_scaled, y_scaled in self._roi_points_scaled:
             x_orig = int(round(x_scaled / scale))
             y_orig = int(round(y_scaled / scale))
             roi_points_orig.append((x_orig, y_orig))
-
-        # ===== 合法性校验 =====
         h, w = self._roi_orig_h, self._roi_orig_w
         roi_array = np.array(roi_points_orig, dtype=np.int32)
-
         if roi_array.ndim != 2 or roi_array.shape[1] != 2:
             self.log_message("ROI 格式错误")
             return
-
         xs, ys = roi_array[:, 0], roi_array[:, 1]
         if not (np.all(xs >= 0) and np.all(xs < w) and np.all(ys >= 0) and np.all(ys < h)):
             self.log_message(f"ROI 点超出视频帧范围（宽{w}, 高{h}）")
             return
-
         area = cv2.contourArea(roi_array)
         if area <= 1.0:
             self.log_message("ROI 区域无效：面积过小或退化")
             return
-
-        # 保存
         self.roi = roi_array.copy()
         self.roi_label.config(text="关注区域已设置", foreground="orange")
         self.roi_button.config(text="取消选取", command=self.cancel_roi)
         self.log_message(f"成功设置 ROI，面积: {area:.1f} 像素")
-
         self._roi_window.destroy()
 
-    #重置 & 取消ROI    
     def _reset_roi_points(self):
         self._roi_points_scaled.clear()
         self._redraw_roi()
@@ -768,67 +667,39 @@ class VideoDetectionApp:
         self.roi_button.config(text="选取关注区域", command=self.select_roi)
         self.log_message("已取消关注区域")
 
-    #ROI end
-
-    # 同步预览实现 
+    # 同步预览实现
     def toggle_preview(self):
-        """切换同步预览（支持多文件连续预览）"""
         if not self.file_paths:
             self.log_message("请先选择视频文件")
             return
-            
         if self._preview_active:
-            # 关闭预览：清空预览标签，终止更新循环
             self._preview_label.config(image="", text="预览已关闭")
             self._preview_active = False
             self.preview_button.config(text="开启实时预览")
             self.preview_status.config(text="预览: 关闭", foreground="gray")
             self.log_message("实时预览已关闭")
         else:
-            # 开启预览：启动更新循环，无需等待单个文件开始
             self._preview_active = True
             self.preview_button.config(text="关闭实时预览")
             self.preview_status.config(text="预览: 开启", foreground="orange")
             self.log_message("实时预览已开启，将跟随多文件处理连续同步显示")
-            # 立即启动预览更新循环
             self._update_preview_display()
-
-    def _start_preview(self):
-        """启动同步预览"""
-        self._preview_active = True
-        
-        self._preview_window = ttk.Toplevel(self.root)
-        self._preview_window.title("实时预览")
-        self._preview_window.geometry("800x600")
-        self._preview_window.protocol("WM_DELETE_WINDOW", self._close_preview)
-        
-        self._preview_label = ttk.Label(self._preview_window)
-        self._preview_label.pack(fill=BOTH, expand=True)
-        
-        self.preview_button.config(text="关闭实时预览")
-        self.preview_status.config(text="预览: 开启", foreground="orange")
-        
-        self._update_preview_display()
 
     def _update_preview_display(self):
         if not self._preview_active:
             return
-
         frame_processed = False
         try:
             item = self._preview_queue.get_nowait()
             if isinstance(item, (tuple, list)) and len(item) == 3:
                 frame, frame_idx, annotate_info = item
                 if frame is not None:
-                    # 绘制ROI
                     if self.roi is not None:
                         cv2.polylines(frame, [self.roi], isClosed=True, color=(0, 255, 0), thickness=2)
-
-                    # 绘制标注
                     for (x1, y1, x2, y2, class_display, score) in annotate_info:
                         color = COLORS[hash(class_display) % len(COLORS)]
                         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                        class_en = self.CHINESE_TO_ENGLISH.get(class_display, class_display) #获取英文类别名用于预览标注
+                        class_en = self.CHINESE_TO_ENGLISH.get(class_display, class_display)
                         text = f"{class_en} {score:.2f}"
                         text_size, _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
                         text_x = x1
@@ -841,8 +712,6 @@ class VideoDetectionApp:
                             -1
                         )
                         cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
-                    # 转换并显示
                     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     pil_image = Image.fromarray(rgb_frame)
                     preview_width = self._preview_label.winfo_width() or 600
@@ -852,30 +721,21 @@ class VideoDetectionApp:
                     self._preview_label.config(image=self._current_preview_photo, text="")
                     self._preview_label.image = self._current_preview_photo
                     frame_processed = True
-
         except queue.Empty:
             pass
         except Exception as e:
             self.log_message(f"[预览错误] {e}")
-
-        # 无论是否处理帧，只要 _preview_active，就继续递归！
         if self._preview_active:
             self.root.after(30, self._update_preview_display)
 
     def _close_preview(self):
-        """关闭预览（嵌入模式，仅清空标签）"""
         self._preview_active = False
-        
-        # 清空预览标签
         self._preview_label.config(image="")
-        # 清空预览队列
         while not self._preview_queue.empty():
             try:
                 self._preview_queue.get_nowait()
             except:
                 break
-        
-        # 更新按钮和状态
         self.preview_button.config(text="开启实时预览")
         self.preview_status.config(text="预览: 关闭", foreground="gray")
 
@@ -886,22 +746,93 @@ class VideoDetectionApp:
         except queue.Full:
             return f"截图队列已满，跳过: {save_path}"
 
-    #  ROI 检查
+    # ROI 检查（中心点）
     def _is_point_in_roi(self, x, y):
         if self.roi is None:
             return True
         try:
-            # 确保 ROI 是有效 np.int32 (N, 2)
             if not isinstance(self.roi, np.ndarray) or self.roi.shape[1] != 2:
-                return True  # 退化为无 ROI
+                return True
             pt = (int(round(x)), int(round(y)))
             result = cv2.pointPolygonTest(self.roi, pt, measureDist=False)
             return result >= 0
         except Exception as e:
             self.log_message(f"[ROI 安全防护] 检查点 ({x:.1f},{y:.1f}) 时出错: {e}")
-            return True  # 安全默认：放行
+            return True
 
-    # 核心：轻量移动检测 
+     # 核心：移动检测：兼顾高跳帧鲁棒性与低抖动敏感性
+    def _is_target_moving_enhanced(self, object_key, current_box, current_time, prev_positions, stable_since, movement_buffer):
+        """
+        融合版移动检测：兼顾高跳帧鲁棒性与低抖动敏感性
+        """
+        prev_data = prev_positions.get(object_key)
+        if prev_data is None:
+            prev_positions[object_key] = (current_box, current_time)
+            return True
+
+        prev_box, prev_time = prev_data
+        time_diff = current_time - prev_time
+        if time_diff <= 0:
+            return False
+
+        # === 第一级：速度检测（高跳帧鲁棒）===
+        # 仅当时间间隔较大时启用速度判断（避免短时间抖动误触发）
+        if time_diff >= 0.3:  # 0.3秒（7帧@24fps 9帧@30fps）可调整到set.ini
+            cx1, cy1 = (prev_box[0] + prev_box[2]) / 2, (prev_box[1] + prev_box[3]) / 2
+            cx2, cy2 = (current_box[0] + current_box[2]) / 2, (current_box[1] + current_box[3]) / 2
+            dx, dy = abs(cx2 - cx1), abs(cy2 - cy1)
+            w = (current_box[2] - current_box[0] + prev_box[2] - prev_box[0]) / 2 + 1e-6
+            h = (current_box[3] - current_box[1] + prev_box[3] - prev_box[1]) / 2 + 1e-6
+            speed_x = dx / time_diff / w
+            speed_y = dy / time_diff / h
+            if speed_x > 1.0 or speed_y > 1.0:
+                # 显著移动：立即判定为移动，并重置稳定状态
+                stable_since.pop(object_key, None)
+                movement_buffer[object_key] = 0
+                prev_positions[object_key] = (current_box, current_time)
+                return True
+
+        # === 第二级：轻量状态检测（抑制抖动）===
+        # 即使速度不高，也可能因连续小幅移动而判定为移动
+        iou = self._box_iou_simple(prev_box, current_box)
+        if iou > self.MOVEMENT_IOU_THRESHOLD:
+            if object_key not in stable_since:
+                stable_since[object_key] = current_time
+            prev_positions[object_key] = (current_box, current_time)
+            return False
+
+        # 计算归一化位移
+        x1, y1, x2, y2 = current_box
+        x1_p, y1_p, x2_p, y2_p = prev_box
+        w_avg = ((x2 - x1) + (x2_p - x1_p)) / 2 + 1e-6
+        h_avg = ((y2 - y1) + (y2_p - y1_p)) / 2 + 1e-6
+        dx = abs((x1 + x2) / 2 - (x1_p + x2_p) / 2)
+        dy = abs((y1 + y2) / 2 - (y1_p + y2_p) / 2)
+        rel_dx, rel_dy = dx / w_avg, dy / h_avg
+
+        moved = rel_dx > self.MOVEMENT_RELATIVE_THRESHOLD or rel_dy > self.MOVEMENT_RELATIVE_THRESHOLD
+
+        # 更新 movement_buffer
+        if object_key not in movement_buffer:
+            movement_buffer[object_key] = 0
+        movement_buffer[object_key] = movement_buffer[object_key] + 1 if moved else 0
+
+        # 判断是否真正移动
+        last_stable = stable_since.get(object_key, -10)
+        recently_stable = (current_time - last_stable) < self.MOVEMENT_STABLE_SECONDS
+
+        if recently_stable and movement_buffer[object_key] >= self.MOVEMENT_CONSECUTIVE_FRAMES:
+            stable_since.pop(object_key, None)
+            result = True
+        elif not recently_stable:
+            result = movement_buffer[object_key] >= self.MOVEMENT_CONSECUTIVE_FRAMES
+        else:
+            result = False
+
+        prev_positions[object_key] = (current_box, current_time)
+        return result
+
+    # IOU 计算
     def _box_iou_simple(self, box1, box2):
         x1, y1, x2, y2 = box1
         x1_p, y1_p, x2_p, y2_p = box2
@@ -917,51 +848,8 @@ class VideoDetectionApp:
         union_area = area1 + area2 - inter_area
         return inter_area / union_area
 
-    def _is_target_moving_enhanced(self, object_key, current_box, current_time, prev_positions, stable_since, movement_buffer):
-        prev_box = prev_positions.get(object_key)
-        if prev_box is None:
-            return True
 
-        iou = self._box_iou_simple(prev_box, current_box)
-        if iou > self.MOVEMENT_IOU_THRESHOLD:
-            if object_key not in stable_since:
-                stable_since[object_key] = current_time
-            return False
 
-        x1, y1, x2, y2 = current_box
-        x1_p, y1_p, x2_p, y2_p = prev_box
-        w_curr = x2 - x1
-        h_curr = y2 - y1
-        w_prev = x2_p - x1_p
-        h_prev = y2_p - y1_p
-        w_avg = (w_curr + w_prev) / 2 + 1e-6
-        h_avg = (h_curr + h_prev) / 2 + 1e-6
-
-        dx = abs((x1 + x2) / 2 - (x1_p + x2_p) / 2)
-        dy = abs((y1 + y2) / 2 - (y1_p + y2_p) / 2)
-        rel_dx = dx / w_avg
-        rel_dy = dy / h_avg
-
-        moved = rel_dx > self.MOVEMENT_RELATIVE_THRESHOLD or rel_dy > self.MOVEMENT_RELATIVE_THRESHOLD
-
-        if object_key not in movement_buffer:
-            movement_buffer[object_key] = 0
-
-        if moved:
-            movement_buffer[object_key] += 1
-        else:
-            movement_buffer[object_key] = 0
-
-        last_stable = stable_since.get(object_key, -10)
-        recently_stable = (current_time - last_stable) < self.MOVEMENT_STABLE_SECONDS
-        if recently_stable and movement_buffer[object_key] >= self.MOVEMENT_CONSECUTIVE_FRAMES:
-            del stable_since[object_key]
-            return True
-        elif not recently_stable:
-            return movement_buffer[object_key] >= self.MOVEMENT_CONSECUTIVE_FRAMES
-        return False
-
-    # ==============================
     def read_frames_producer(self, video_path, skip_frames):
         cap = cv2.VideoCapture(video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -982,10 +870,7 @@ class VideoDetectionApp:
                     break
                 with self.progress_lock:
                     self.current_frame = frame_idx
-
-                # 直接传原始帧（Ultralytics 会自动 letterbox）
                 try:
-                    # 两个都是原始帧：第一个用于截图/预览，第二个用于模型推理
                     self.frame_queue.put((frame.copy(), frame.copy(), frame_idx), timeout=1.0)
                 except queue.Full:
                     time.sleep(0.01)
@@ -998,38 +883,30 @@ class VideoDetectionApp:
             except queue.Full:
                 self.log_message("[WARN] 预览队列满，无法发送视频结束信号")
 
-    #进度更新：带暂停检查
     def _progress_updater(self, file_idx, total_files):
-        """独立线程：定期更新进度条（带暂停检查）"""
         last_frame = -1
         while not self.stopped:
-            # 暂停时跳过进度更新
             if self.paused_display:
                 time.sleep(0.1)
                 continue
-                
             with self.progress_lock:
                 current = self.current_frame
                 total = self.total_frames
                 current_file_idx = self._current_file_idx
-
-            if current_file_idx != file_idx:
-                break
-
-            if total > 0 and current != last_frame:
-                progress = min(99, int(100 * current / total))
-                self.root.after(0, lambda p=progress: self.progress_var.set(p))
-                self.root.after(0, lambda f=file_idx+1, t=total_files, p=progress: 
-                    self.status_label.config(text=f"处理文件 {f}/{t} | 进度: {p}%"))
-                last_frame = current
-
+                if current_file_idx != file_idx:
+                    break
+                if total > 0 and current != last_frame:
+                    progress = min(99, int(100 * current / total))
+                    self.root.after(0, lambda p=progress: self.progress_var.set(p))
+                    self.root.after(0, lambda f=file_idx+1, t=total_files, p=progress:
+                        self.status_label.config(text=f"处理文件 {f}/{t} | 进度: {p}%"))
+                    last_frame = current
             time.sleep(0.1)
-
         if not self.stopped and file_idx == total_files - 1:
             self.root.after(0, lambda: self.progress_var.set(100))
 
     def process_videos(self, file_paths: list, save_folder: str, selected_classes: list, skip_frames: int, only_moving: bool,
-                    annotate_objects: bool, confidence_threshold: float):
+                       annotate_objects: bool, confidence_threshold: float):
         try:
             total_files = len(file_paths)
             for file_idx, file_path in enumerate(file_paths):
@@ -1039,7 +916,6 @@ class VideoDetectionApp:
                     self._current_file_idx = file_idx
                     self.current_frame = 0
                     self.total_frames = 0
-
                 self.log_message(f"切换到第 {file_idx+1}/{total_files} 个文件，预览已同步跟随")
                 self.roi_entered_boxes = []
                 prev_positions = {}
@@ -1105,10 +981,8 @@ class VideoDetectionApp:
                     )
                 progress_thread.join(timeout=1)
                 reader_thread.join(timeout=2)
-
             if not self.stopped:
                 self.update_status("所有文件处理完成！")
-
         except Exception as e:
             self.log_message(f"处理出错: {e}\n{traceback.format_exc()}")
             self.update_status(f"错误: {str(e)}")
@@ -1120,13 +994,11 @@ class VideoDetectionApp:
                 if self.stopped:
                     self.update_status("处理已停止")
                     self.log_message("处理已停止")
-                    if self._preview_active:
-                        self._preview_label.config(text="处理已停止，预览中断", image="")
+                if self._preview_active:
+                    self._preview_label.config(text="处理已停止，预览中断", image="")
                 else:
                     self.update_status("所有文件处理完成！")
             self.root.after_idle(reset_ui)
-
-            # 所有任务结束后，清空预览队列（可保留）
             while not self._preview_queue.empty():
                 try:
                     self._preview_queue.get_nowait()
@@ -1134,18 +1006,17 @@ class VideoDetectionApp:
                     break
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-    #---------------------------------------------------------
+
     def _run_batch_inference_optimized(self, batch_input_frames, batch_original_frames, batch_frame_counts,
-                                    selected_classes, only_moving, annotate_objects,
-                                    confidence_threshold, orig_w, orig_h,
-                                    save_folder, file_path,
-                                    prev_positions, stable_since, movement_buffer):
+                                      selected_classes, only_moving, annotate_objects,
+                                      confidence_threshold, orig_w, orig_h,
+                                      save_folder, file_path,
+                                      prev_positions, stable_since, movement_buffer):
         try:
-            #直接传原始帧列表给 model()（Ultralytics 会自动 letterbox + 还原坐标）
             if CUDA_STREAM is not None:
                 with torch.cuda.stream(CUDA_STREAM):
                     results_list = self.model(
-                        batch_input_frames,  # ← 原始帧列表
+                        batch_input_frames,
                         conf=confidence_threshold,
                         iou=self.NMS_IOU_THRESHOLD,
                         verbose=False
@@ -1158,7 +1029,6 @@ class VideoDetectionApp:
                     iou=self.NMS_IOU_THRESHOLD,
                     verbose=False
                 )
-
             for idx, results in enumerate(results_list):
                 frame = batch_original_frames[idx]
                 frame_count = batch_frame_counts[idx]
@@ -1171,12 +1041,9 @@ class VideoDetectionApp:
                         except queue.Full:
                             pass
                     continue
-
-                # Ultralytics 自动将 boxes 还原到原始视频分辨率！
-                boxes = results.boxes.xyxy.cpu().numpy()  # shape: (N, 4) in [orig_w, orig_h] coordinate
+                boxes = results.boxes.xyxy.cpu().numpy()
                 scores = results.boxes.conf.cpu().numpy()
                 class_ids = results.boxes.cls.cpu().numpy().astype(int)
-
                 filtered_boxes = []
                 filtered_scores = []
                 filtered_class_ids = []
@@ -1189,7 +1056,6 @@ class VideoDetectionApp:
                     filtered_boxes.append(box)
                     filtered_scores.append(score)
                     filtered_class_ids.append(cls_id)
-
                 if not filtered_boxes:
                     if self._preview_active:
                         try:
@@ -1199,8 +1065,6 @@ class VideoDetectionApp:
                         except queue.Full:
                             pass
                     continue
-
-                # 跨类别高 IoU 去重（去重逻辑）
                 detections = [(filtered_scores[i], filtered_boxes[i], filtered_class_ids[i]) for i in range(len(filtered_scores))]
                 detections.sort(key=lambda x: x[0], reverse=True)
                 to_keep = [True] * len(detections)
@@ -1238,13 +1102,10 @@ class VideoDetectionApp:
                         except queue.Full:
                             pass
                     continue
-
                 kept_scores, kept_boxes, kept_class_ids = zip(*kept_detections)
                 kept_scores = np.array(kept_scores)
                 kept_boxes = np.array(kept_boxes)
                 kept_class_ids = np.array(kept_class_ids)
-
-                # 构造预览标注（ROI 检查使用原始坐标）
                 preview_annotate_info = []
                 for box, score, cls_id in zip(kept_boxes, kept_scores, kept_class_ids):
                     x1, y1, x2, y2 = box.astype(int)
@@ -1260,8 +1121,6 @@ class VideoDetectionApp:
                         self._preview_queue.put_nowait((frame.copy(), frame_count, preview_annotate_info))
                     except queue.Full:
                         pass
-
-                # 截图逻辑（原始坐标）
                 for box, score, cls_id in zip(kept_boxes, kept_scores, kept_class_ids):
                     x1, y1, x2, y2 = box.astype(int)
                     current_box = (x1, y1, x2, y2)
@@ -1279,7 +1138,7 @@ class VideoDetectionApp:
                         else:
                             obj_key = f"{cls_id}_{x1}_{y1}_{x2}_{y2}"
                             if self._is_target_moving_enhanced(obj_key, current_box, frame_count / 30,
-                                                            prev_positions, stable_since, movement_buffer):
+                                                              prev_positions, stable_since, movement_buffer):
                                 should_process = True
                             prev_positions[obj_key] = current_box
                     else:
@@ -1303,12 +1162,11 @@ class VideoDetectionApp:
                     save_path = os.path.join(save_folder, f"{safe_base}_frame{frame_count}_{safe_class}.jpg")
                     msg = self.save_image_safely(annotate_frame, save_path)
                     self.log_message(f"发现目标: {class_display} 置信度{score:.2f} → {msg}")
-
         except Exception as e:
             self.log_message(f"批量推理出错: {e}")
             import traceback
             self.log_message(traceback.format_exc())
-    #---------------------------------------------------------
+
     def start_processing(self):
         if not self.file_paths:
             self.log_message("错误: 未选择视频文件")
@@ -1321,14 +1179,12 @@ class VideoDetectionApp:
                 pass
             os.remove(os.path.join(self.save_folder, "test.tmp"))
         except Exception as e:
-            Messagebox.showerror("路径错误", f"保存路径不可写: {e}")
+            messagebox.showerror("路径错误", f"保存路径不可写: {e}")
             return
-
         selected = [self.class_names[i] for i, v in enumerate(self.class_vars) if v.get()]
         if not selected:
             self.log_message("错误: 未选择任何目标类")
             return
-
         try:
             skip_frames = max(1, min(64, int(self.speed_entry.get())))
         except ValueError:
@@ -1337,21 +1193,16 @@ class VideoDetectionApp:
             conf = max(0.0, min(1.0, float(self.confidence_entry.get())))
         except ValueError:
             conf = 0.1
-
         only_moving = self.only_moving_var.get() == 1
         annotate = self.annotate_var.get() == 1
-
         self._auto_adjust_batch_size()
-
         self.paused = False
         self.stopped = False
-        # 重置暂停显示标志
         self.paused_display = False
         self.start_button.config(state=DISABLED)
         self.pause_button.config(state=NORMAL)
         self.stop_button.config(state=NORMAL)
         self.log_message("开始处理...")
-
         threading.Thread(target=self.process_videos, args=(
             self.file_paths, self.save_folder, selected, skip_frames, only_moving, annotate, conf
         ), daemon=True).start()
@@ -1361,13 +1212,11 @@ class VideoDetectionApp:
         if self.paused:
             self.pause_button.config(text="继续处理")
             self.log_message("处理已暂停")
-            # 设置暂停显示标志
             self.paused_display = True
             self.update_status("处理已暂停...")
         else:
             self.pause_button.config(text="暂停处理")
             self.log_message("处理已继续")
-            # 清除暂停显示标志
             self.paused_display = False
             if self.current_processing_status:
                 self.update_status(self.current_processing_status)
@@ -1378,16 +1227,16 @@ class VideoDetectionApp:
         if not self.stopped:
             self.stopped = True
             self.paused = False
-            self.paused_display = False 
+            self.paused_display = False
             self.current_processing_status = ""
             self.log_message("正在停止处理...")
             self.update_status("正在停止...")
-        while not self.save_queue.empty():
-            try:
-                self.save_queue.get_nowait()
-                self.save_queue.task_done()
-            except:
-                break
+            while not self.save_queue.empty():
+                try:
+                    self.save_queue.get_nowait()
+                    self.save_queue.task_done()
+                except:
+                    break
 
     def select_all_classes(self):
         for v in self.class_vars:
@@ -1400,7 +1249,6 @@ class VideoDetectionApp:
         self.log_message("取消已选目标")
 
     def update_stats_periodically(self):
-        """定期更新统计面板"""
         if self._ui_ready:
             self.fps_label.config(text=f"FPS(每秒处理帧数): {self.stats['fps']:.1f}")
             self.targets_label.config(text=f"截图总数: {self.stats['total_targets']}")
@@ -1424,9 +1272,7 @@ class VideoDetectionApp:
             except:
                 pass
 
-
 if __name__ == "__main__":
-    # 初始化ttkbootstrap窗口，可选择主题（如darkly、yeti、simplex、cyborg、superhero等）
     root = ttk.Window(themename="darkly")
     app = VideoDetectionApp(root)
     root.mainloop()
