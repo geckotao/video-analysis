@@ -3,7 +3,7 @@
 一、功能简介
 本工具可对一个或多个视频文件进行目标检测（基于 YOLO 模型），自动截图指定类别的目标，并支持以下高级功能：
 
-选择多个目标类别（如“车”、“人”、“狗”等）
+选择多个目标类别（如“人”、“自行车”、“摩托车”等）
 设置关注区域（ROI）：只在指定区域内检测目标
 移动目标检测：仅对首次出现或发生移动的目标截图
 实时预览处理画面（带检测框和 ROI 显示）
@@ -13,10 +13,10 @@
 
 二、使用步骤
 1. 准备工作
-python 3.11+
+python 3.8.10+
 确保已安装依赖
-pip install ultralytics torch torchvision opencv-python pillow ttkbootstrap nvidia-ml-py  （注：torch安装CUDA版本才能使用英伟达显卡加速，要CU118+，显卡驱动522.06+）
-将 YOLO 模型（如 yolo11x.pt）放入 ./models/ 目录（可修改 set.ini 指定路径）
+pip install ultralytics torch torchvision opencv-python ttkbootstrap nvidia-ml-py  （注：torch安装CUDA版本才能使用英伟达显卡加速，要CU118+，显卡驱动522.06+）
+将 YOLO 模型（如 yolo26x.pt）放入 ./models/ 目录（可修改 set.ini 指定路径）
 
 2. 启动程序
 python main.py
@@ -59,7 +59,7 @@ python main.py
 模型需为 Ultralytics YOLO 格式（如 .pt 文件）。
 若指定模型不存在，程序启动将报错。
 
-✅ 建议：将常用模型放入 ./models/ 目录，如 yolo11n.pt（小模型快）、yolo11x.pt（大模型准）。
+✅ 建议：将常用模型放入 ./models/ 目录，如 yolo26n.pt（小模型快）、yolo26x.pt（大模型准）。
 
 2. nms_iou_threshold
 类型：浮点数（0.0 ~ 1.0）
