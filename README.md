@@ -10,13 +10,13 @@
 自动跳帧处理（提升速度）
 支持在截图上标注目标类别与置信度
 支持中文路径与文件名
-
+增加一个结果查看辅助工具
 二、使用步骤
 1. 准备工作
 python 3.8.10+
 确保已安装依赖
 pip install ultralytics torch torchvision opencv-python ttkbootstrap nvidia-ml-py  （注：torch安装CUDA版本才能使用英伟达显卡加速，要CU118+，显卡驱动522.06+）
-将 YOLO 模型（如 yolo26x.pt）放入 ./models/ 目录（可修改 set.ini 指定路径）
+将 YOLO 模型（如 yolo11x.pt、yolo26x.pt）放入 ./models/ 目录（可修改 set.ini 指定路径）
 
 2. 启动程序
 python main.py
