@@ -45,7 +45,7 @@ python main.py
 截图保存格式：
 <视频文件名>_frame<帧号>_<目标类别>.jpg
 例如：test_video_frame1285_小车.jpg
-
+也可用 python View_results.py 使用结果查看辅助工具查看
 三、配置文件说明（set.ini）
 配置项详解
 
