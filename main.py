@@ -1,5 +1,5 @@
 # main.py
-#update 2026-03-04
+#update 2026-07-21
 import sys
 import os
 import cv2
@@ -882,7 +882,7 @@ class MainWindow(QMainWindow):
         if not self.file_paths:
             self.log_message("错误：请先选择视频文件")
             return
-        cap = cv2.VideoCapture(self.file_paths[0])
+        cap = cv2.VideoCapture(self.file_paths[0], cv2.CAP_FFMPEG)
         ret, frame = cap.read()
         cap.release()
         if not ret:
@@ -1091,7 +1091,7 @@ class MainWindow(QMainWindow):
                     break
                 self._processing_file_index = file_idx
                 self.current_frame = 0
-                cap_temp = cv2.VideoCapture(file_path)
+                cap_temp = cv2.VideoCapture(file_path, cv2.CAP_FFMPEG)
                 total_frames = int(cap_temp.get(cv2.CAP_PROP_FRAME_COUNT))
                 orig_h = int(cap_temp.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 orig_w = int(cap_temp.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -1104,7 +1104,7 @@ class MainWindow(QMainWindow):
                 frame_queue = queue.Queue(maxsize=10)
                 
                 def read_frames():
-                    cap = cv2.VideoCapture(file_path)
+                    cap = cv2.VideoCapture(file_path, cv2.CAP_FFMPEG)
                     frame_idx = 0
                     while cap.isOpened() and not self.stopped:
                         while self.paused:
