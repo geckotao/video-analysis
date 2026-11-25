@@ -1,4 +1,4 @@
-# View_results.py
+# View_results.py  
 import sys
 import os
 import re
@@ -362,7 +362,7 @@ class VideoPlayer(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowIcon(QIcon("viewer.ico"))
-        self.setWindowTitle("目标检测结果查看工具 V2.0")
+        self.setWindowTitle("目标检测结果查看工具 V2.1")
         self.setWindowFlags(
             Qt.Window | Qt.WindowMinimizeButtonHint |
             Qt.WindowMaximizeButtonHint | Qt.WindowCloseButtonHint |
@@ -378,6 +378,7 @@ class VideoPlayer(QMainWindow):
         self.video_files = []
         self.current_video_index = -1
         self.was_playing_before_slider = False
+        self.current_bgr_frame = None
         self.target_checkboxes = {}
         self.filter_layout = None
         self.init_ui()
@@ -694,22 +695,19 @@ class VideoPlayer(QMainWindow):
         self.play_forward()
 
     def capture_screenshot(self):
-        if not self.cap or self.current_frame < 0 or self.current_video_index == -1:
+        if self.current_bgr_frame is None or self.current_video_index == -1:
             QMessageBox.warning(self, "提示", "当前无可用视频帧，无法截图")
             return
+            
         screenshot_dir = os.path.join(os.getcwd(), "screenshots")
         os.makedirs(screenshot_dir, exist_ok=True)
         video_basename = os.path.splitext(os.path.basename(self.video_files[self.current_video_index]))[0]
         timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
         screenshot_filename = f"{video_basename}_frame{self.current_frame}_{timestamp}.jpg"
         screenshot_path = os.path.normpath(os.path.join(screenshot_dir, screenshot_filename))
+        
         try:
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.current_frame)
-            ret, frame = self.cap.read()
-            if not ret:
-                QMessageBox.warning(self, "提示", "读取当前视频帧失败，无法截图")
-                return
-            success, img_encoded = cv2.imencode('.jpg', frame)
+            success, img_encoded = cv2.imencode('.jpg', self.current_bgr_frame)
             if success:
                 with open(screenshot_path, 'wb') as f:
                     f.write(img_encoded.tobytes())
@@ -807,6 +805,12 @@ class VideoPlayer(QMainWindow):
         if not self.cap.isOpened():
             QMessageBox.critical(self, "错误", f"无法打开视频：{path}")
             return
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 3)
+        for _ in range(10):
+            ret, _ = self.cap.read()
+            if not ret:
+                break
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)     
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.fps = max(1.0, self.cap.get(cv2.CAP_PROP_FPS))
         self.current_frame = 0
@@ -897,6 +901,7 @@ class VideoPlayer(QMainWindow):
             self.video_label.clear()
 
     def display_frame(self, frame):
+        self.current_bgr_frame = frame.copy() 
         h, w = frame.shape[:2]
         label_size = self.video_label.size()
         if label_size.width() <= 0 or label_size.height() <= 0:
